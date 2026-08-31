@@ -9,11 +9,17 @@ export type Account = {
   deviceUuid: string;
 };
 
+export type RoomConfig = { name: string; enabled: boolean };
+
 export type Config = {
   prefix: string;
   rooms: string[];
   accounts: Account[];
   activeAccount: string | null;
+  roomConfigs: Record<string, RoomConfig>;
+  admins: string[];
+  moderators: string[];
+  logLevel: 'info' | 'debug';
 };
 
 const DATA_DIR = path.join(os.homedir(), '.loco-termux');
@@ -25,32 +31,31 @@ export function ensureDataDir(): void {
 
 export function loadConfig(): Config {
   ensureDataDir();
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return { prefix: '!', rooms: [], accounts: [], activeAccount: null };
-  }
+  const defaults: Config = { prefix: '!', rooms: [], accounts: [], activeAccount: null, roomConfigs: {}, admins: [], moderators: [], logLevel: 'info' };
+  if (!fs.existsSync(CONFIG_FILE)) return defaults;
   try {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config>;
     return {
-      prefix: parsed.prefix || '!',
-      rooms: Array.isArray(parsed.rooms) ? parsed.rooms.filter(Boolean) : [],
+      ...defaults, ...parsed,
+      rooms: Array.isArray(parsed.rooms) ? [...new Set(parsed.rooms.filter(Boolean))] : [],
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
-      activeAccount: parsed.activeAccount || null,
+      roomConfigs: parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs : {},
+      admins: Array.isArray(parsed.admins) ? parsed.admins.filter(Boolean) : [],
+      moderators: Array.isArray(parsed.moderators) ? parsed.moderators.filter(Boolean) : [],
     };
-  } catch {
-    return { prefix: '!', rooms: [], accounts: [], activeAccount: null };
-  }
+  } catch { return defaults; }
 }
 
 export function saveConfig(config: Config): void {
   ensureDataDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
-  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch { /* Android/Termux may reject chmod */ }
+  const tmp = `${CONFIG_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, CONFIG_FILE);
+  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch { /* Termux */ }
 }
 
 export function parseRoomList(input: string): string[] {
-  return input.split(',').map(v => v.trim()).filter(Boolean);
+  return [...new Set(input.split(',').map(v => v.trim()).filter(Boolean))];
 }
 
-export function roomListToString(rooms: string[]): string {
-  return `,${rooms.join(',')},`;
-}
+export function roomListToString(rooms: string[]): string { return `,${rooms.join(',')},`; }
