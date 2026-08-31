@@ -163,10 +163,21 @@ client.on('chat', async (data, channel) => {
       '!명령어 - 명령어 목록',
       '!echo <내용> - 내용 반복',
       '!봇등록 - Termux에 8자리 방 등록 코드 생성',
+      '!방등록해제 - 현재 채팅방의 봇 등록 해제',
       '!kick @멘션 - 관리자 전용 내보내기 명령(지원 API가 있는 경우)',
     ].join('\n'));
   } else if (cmd === 'echo') {
     await channel.sendChat(args.join(' ') || '사용법: !echo <내용>');
+  } else if (cmd === '방등록해제') {
+    const index = config.rooms.indexOf(roomName);
+    if (index === -1) {
+      await channel.sendChat('ℹ️ 이 채팅방은 등록되어 있지 않습니다.');
+      return;
+    }
+    config.rooms.splice(index, 1);
+    saveConfig(config);
+    console.log(`[✓] 방 등록 해제: ${roomName}`);
+    await channel.sendChat('✓ 이 채팅방의 봇 등록을 해제했습니다.');
   } else if (cmd === 'kick') {
     // node-kakao 버전별 관리자/강퇴 API 차이가 있어 임의의 내부 API를 호출하지 않는다.
     await channel.sendChat('⚠️ 강퇴 기능은 현재 연결된 node-kakao 버전의 채널 관리자 API 확인이 필요합니다.');
