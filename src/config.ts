@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 
 export type Account = {
   email: string;
@@ -51,18 +52,10 @@ export function ensureDataDir(): void {
 export function loadConfig(): Config {
   ensureDataDir();
   const defaults: Config = {
-    prefix: '!',
-    rooms: [],
-    accounts: [],
-    activeAccount: null,
-    roomConfigs: {},
-    admins: [],
-    moderators: [],
-    logLevel: 'info',
-    chatStats: [],
-    memberEvents: [],
+    prefix: '!', rooms: [], accounts: [], activeAccount: null,
+    roomConfigs: {}, admins: [], moderators: [], logLevel: 'info',
+    chatStats: [], memberEvents: [],
   };
-
   if (!fs.existsSync(CONFIG_FILE)) return defaults;
 
   try {
@@ -70,16 +63,13 @@ export function loadConfig(): Config {
       accounts?: Array<Account & { name?: string }>;
     };
 
-    // 기존 name 필드를 가진 설정도 이메일 기반 계정으로 자동 마이그레이션한다.
     const accounts: Account[] = Array.isArray(parsed.accounts)
       ? parsed.accounts
           .filter(a => a && typeof a.email === 'string' && typeof a.password === 'string')
           .map(a => ({
             email: a.email.trim(),
             password: a.password,
-            deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid
-              ? a.deviceUuid
-              : cryptoRandomUuidFallback(),
+            deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid ? a.deviceUuid : crypto.randomUUID(),
           }))
       : [];
 
@@ -102,12 +92,6 @@ export function loadConfig(): Config {
   } catch {
     return defaults;
   }
-}
-
-function cryptoRandomUuidFallback(): string {
-  // config.ts는 인증 로직과 분리되어 있으므로 Node의 crypto 모듈을 동적으로 사용한다.
-  const crypto = require('node:crypto') as typeof import('node:crypto');
-  return crypto.randomUUID();
 }
 
 export function saveConfig(config: Config): void {
