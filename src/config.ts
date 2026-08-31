@@ -3,13 +3,30 @@ import path from 'node:path';
 import os from 'node:os';
 
 export type Account = {
-  name: string;
   email: string;
   password: string;
   deviceUuid: string;
 };
 
 export type RoomConfig = { name: string; enabled: boolean };
+
+export type ChatStat = {
+  room: string;
+  userKey: string;
+  userName: string;
+  count: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+};
+
+export type MemberEvent = {
+  room: string;
+  userKey: string;
+  userName: string;
+  type: 'JOIN' | 'LEAVE';
+  at: string;
+  count: number;
+};
 
 export type Config = {
   prefix: string;
@@ -20,6 +37,8 @@ export type Config = {
   admins: string[];
   moderators: string[];
   logLevel: 'info' | 'debug';
+  chatStats: ChatStat[];
+  memberEvents: MemberEvent[];
 };
 
 const DATA_DIR = path.join(os.homedir(), '.loco-termux');
@@ -31,19 +50,64 @@ export function ensureDataDir(): void {
 
 export function loadConfig(): Config {
   ensureDataDir();
-  const defaults: Config = { prefix: '!', rooms: [], accounts: [], activeAccount: null, roomConfigs: {}, admins: [], moderators: [], logLevel: 'info' };
+  const defaults: Config = {
+    prefix: '!',
+    rooms: [],
+    accounts: [],
+    activeAccount: null,
+    roomConfigs: {},
+    admins: [],
+    moderators: [],
+    logLevel: 'info',
+    chatStats: [],
+    memberEvents: [],
+  };
+
   if (!fs.existsSync(CONFIG_FILE)) return defaults;
+
   try {
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config>;
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config> & {
+      accounts?: Array<Account & { name?: string }>;
+    };
+
+    // 기존 name 필드를 가진 설정도 이메일 기반 계정으로 자동 마이그레이션한다.
+    const accounts: Account[] = Array.isArray(parsed.accounts)
+      ? parsed.accounts
+          .filter(a => a && typeof a.email === 'string' && typeof a.password === 'string')
+          .map(a => ({
+            email: a.email.trim(),
+            password: a.password,
+            deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid
+              ? a.deviceUuid
+              : cryptoRandomUuidFallback(),
+          }))
+      : [];
+
+    const activeAccount = typeof parsed.activeAccount === 'string'
+      ? parsed.activeAccount
+      : accounts[0]?.email ?? null;
+
     return {
-      ...defaults, ...parsed,
+      ...defaults,
+      ...parsed,
       rooms: Array.isArray(parsed.rooms) ? [...new Set(parsed.rooms.filter(Boolean))] : [],
-      accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+      accounts,
+      activeAccount,
       roomConfigs: parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs : {},
       admins: Array.isArray(parsed.admins) ? parsed.admins.filter(Boolean) : [],
       moderators: Array.isArray(parsed.moderators) ? parsed.moderators.filter(Boolean) : [],
+      chatStats: Array.isArray(parsed.chatStats) ? parsed.chatStats : [],
+      memberEvents: Array.isArray(parsed.memberEvents) ? parsed.memberEvents : [],
     };
-  } catch { return defaults; }
+  } catch {
+    return defaults;
+  }
+}
+
+function cryptoRandomUuidFallback(): string {
+  // config.ts는 인증 로직과 분리되어 있으므로 Node의 crypto 모듈을 동적으로 사용한다.
+  const crypto = require('node:crypto') as typeof import('node:crypto');
+  return crypto.randomUUID();
 }
 
 export function saveConfig(config: Config): void {
@@ -58,4 +122,6 @@ export function parseRoomList(input: string): string[] {
   return [...new Set(input.split(',').map(v => v.trim()).filter(Boolean))];
 }
 
-export function roomListToString(rooms: string[]): string { return `,${rooms.join(',')},`; }
+export function roomListToString(rooms: string[]): string {
+  return `,${rooms.join(',')},`;
+}
