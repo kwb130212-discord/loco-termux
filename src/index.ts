@@ -17,6 +17,15 @@ const client = new TalkClient();
 let activeAccount: Account | null = null;
 let running = false;
 let pendingRegistration: { code: string; expiresAt: number } | null = null;
+let saveTimer: NodeJS.Timeout | null = null;
+
+function scheduleSave(): void {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveConfig(config);
+  }, 1000);
+}
 
 function banner(): void {
   console.clear();
@@ -138,15 +147,14 @@ function recordChat(room: string, user: any): void {
     stat.userName = userName;
     stat.lastSeenAt = now;
   } else {
-    const newStat: ChatStat = {
+    config.chatStats.push({
       room,
       userKey,
       userName,
       count: 1,
       firstSeenAt: now,
       lastSeenAt: now,
-    };
-    config.chatStats.push(newStat);
+    });
   }
 }
 
@@ -165,7 +173,6 @@ function recordMemberEvent(room: string, user: any, type: 'JOIN' | 'LEAVE'): num
     count,
   });
 
-  // 무한히 커지는 설정 파일을 방지하기 위해 최근 2,000건만 보관한다.
   if (config.memberEvents.length > 2000) {
     config.memberEvents.splice(0, config.memberEvents.length - 2000);
   }
@@ -191,8 +198,8 @@ function formatChatRanking(room: string): string {
   return lines.join('\n');
 }
 
-function formatMemberLogs(room: string): string {
-  const logs = config.memberEvents.filter(e => e.room === room).slice(-50).reverse();
+function formatMemberLogs(room: string, limit = 100): string {
+  const logs = config.memberEvents.filter(e => e.room === room).slice(-limit).reverse();
   if (!logs.length) return '📋 아직 입퇴장 기록이 없습니다.';
 
   const lines = ['📋 입퇴장 로그', ''];
@@ -201,7 +208,8 @@ function formatMemberLogs(room: string): string {
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(new Date(event.at));
     const mark = event.type === 'JOIN' ? '[+]' : '[-]';
-    lines.push(`${mark} ${time} ${event.userName} — ${event.type === 'JOIN' ? '입장' : '퇴장'}`);
+    const extra = event.type === 'JOIN' ? ` (${event.count}번째 입장)` : '';
+    lines.push(`${mark} ${time} ${event.userName} — ${event.type === 'JOIN' ? '입장' : '퇴장'}${extra}`);
   }
   return lines.join('\n');
 }
@@ -215,6 +223,7 @@ function commandHelp(): string {
     '!echo <내용> - 내용 반복',
     '!채팅순위 - 현재 방 채팅 순위',
     '!입퇴장로그 - 최근 입퇴장 로그',
+    '!전체보기 - 최근 입퇴장 로그 전체 출력',
     '!봇정보 - 현재 봇 상태',
     '!봇등록 - 8자리 방 등록 코드 생성',
     '!방등록해제 - 현재 채팅방 등록 해제',
@@ -262,16 +271,14 @@ client.on('chat', async (data, channel) => {
   const sender = data.getSenderInfo?.(channel);
   if (sender) {
     recordChat(roomName, sender);
-    saveConfig(config);
+    scheduleSave();
   }
 
-  // !봇등록은 방 목록에 없는 방에서도 사용할 수 있도록 별도 처리한다.
   if (text === `${config.prefix}봇등록`) {
     printBotRegistrationCode();
     return;
   }
 
-  // 8자리 등록 코드를 방에 입력하면 해당 방을 자동 등록한다.
   if (/^\d{8}$/.test(text) && pendingRegistration && Date.now() < pendingRegistration.expiresAt && text === pendingRegistration.code) {
     if (!config.rooms.includes(roomName)) config.rooms.push(roomName);
     saveConfig(config);
@@ -281,7 +288,6 @@ client.on('chat', async (data, channel) => {
     return;
   }
 
-  // 일반 명령어는 등록된 방에서만 처리한다.
   if (!isAllowedRoom(roomName)) return;
   if (!text.startsWith(config.prefix)) return;
 
@@ -297,7 +303,9 @@ client.on('chat', async (data, channel) => {
   } else if (cmd === '채팅순위') {
     await channel.sendChat(formatChatRanking(roomName));
   } else if (cmd === '입퇴장로그') {
-    await channel.sendChat(formatMemberLogs(roomName));
+    await channel.sendChat(formatMemberLogs(roomName, 50));
+  } else if (cmd === '전체보기') {
+    await channel.sendChat(formatMemberLogs(roomName, 100));
   } else if (cmd === '봇정보') {
     await channel.sendChat([
       '🤖 LOCO TERMUX BOT',
@@ -320,7 +328,6 @@ client.on('chat', async (data, channel) => {
   }
 });
 
-// node-kakao v4 계열의 실제 입장/퇴장 이벤트를 사용한다.
 client.on('user_join', async (joinLog, channel, user) => {
   const roomName = roomNameOf(channel);
   if (!roomName || !isAllowedRoom(roomName)) return;
@@ -329,11 +336,12 @@ client.on('user_join', async (joinLog, channel, user) => {
   saveConfig(config);
 
   const name = userNameOf(user);
-  const firstLine = `@${name}님이 ${roomName}에 입장하셨습니다.`;
-  const secondLine = count === 1 ? '[+] 첫 입장' : `[+] ${count}번째 입장`;
-  const message = `${firstLine}\n\n[+] ${nowText()} ${count === 1 ? '첫 입장' : `${count}번째 입장`}`;
+  const message = count === 1
+    ? `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 첫 입장\n[+] 1번째 입장`
+    : `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 입장\n[+] ${count}번째 입장`;
+
   console.log(`[JOIN] ${roomName} / ${name} / ${count}번째 입장`);
-  await channel.sendChat(`${message}\n${secondLine}`);
+  await channel.sendChat(message);
 });
 
 client.on('user_left', async (leftLog, channel, user) => {
@@ -381,6 +389,8 @@ async function menu(): Promise<void> {
         console.log(`[+] 채팅 통계: ${config.chatStats.length}건`);
         console.log(`[+] 입퇴장 로그: ${config.memberEvents.length}건`);
       } else if (choice === '6') {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveConfig(config);
         console.log('[✓] 종료합니다.');
         process.exit(0);
       } else console.log('[!] 1~6번 중에서 선택하세요.');
