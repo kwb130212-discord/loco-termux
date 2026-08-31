@@ -1,0 +1,24 @@
+{
+  "name": "loco-termux-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js + node-kakao Loco protocol bot template for Termux",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "node-kakao": "4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
