@@ -1,13 +1,14 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Node.js + node-kakao Loco protocol bot template for Termux",
-  "main": "dist/index.js",
+  "description": "Termux Android Bridge bot with persistent room settings and chat/member features",
+  "main": "dist/bridge-main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "start": "node dist/bridge-main.js",
+    "start:loco": "node dist/index.js",
+    "dev": "tsx src/bridge-main.ts"
   },
   "engines": {
     "node": ">=18"
