@@ -1,13 +1,13 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Termux Android Bridge bot with interactive local configuration and persistent room settings",
   "main": "dist/bridge-main.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/bridge-main.js",
-    "start:loco": "node dist/index.js",
+    "start:loco": "node -r ./dist/hold-errors.js dist/index.js",
     "dev": "tsx src/bridge-main.ts"
   },
   "engines": {
