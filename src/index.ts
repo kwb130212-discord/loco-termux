@@ -54,7 +54,7 @@ async function registerAccount(): Promise<void> {
   const rl = readline.createInterface({ input, output });
   try {
     const email = (await rl.question('카카오 계정 이메일/전화번호: ')).trim();
-    const password = await rl.question('비밀번호: ', { hideEchoBack: true });
+    const password = await rl.question('비밀번호: ');
     if (!email || !password) {
       console.log('[!] 이메일과 비밀번호를 모두 입력해야 합니다.');
       return;
@@ -131,9 +131,7 @@ function userKeyOf(user: any): string {
 }
 
 function nowText(): string {
-  return new Intl.DateTimeFormat('ko-KR', {
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date());
+  return new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
 }
 
 function recordChat(room: string, user: any): void {
@@ -141,72 +139,37 @@ function recordChat(room: string, user: any): void {
   const userName = userNameOf(user);
   const now = new Date().toISOString();
   const stat = config.chatStats.find(s => s.room === room && s.userKey === userKey);
-
-  if (stat) {
-    stat.count += 1;
-    stat.userName = userName;
-    stat.lastSeenAt = now;
-  } else {
-    config.chatStats.push({
-      room,
-      userKey,
-      userName,
-      count: 1,
-      firstSeenAt: now,
-      lastSeenAt: now,
-    });
-  }
+  if (stat) { stat.count += 1; stat.userName = userName; stat.lastSeenAt = now; }
+  else config.chatStats.push({ room, userKey, userName, count: 1, firstSeenAt: now, lastSeenAt: now });
 }
 
 function recordMemberEvent(room: string, user: any, type: 'JOIN' | 'LEAVE'): number {
   const userKey = userKeyOf(user);
   const userName = userNameOf(user);
-  const count = config.memberEvents.filter(e => e.room === room && e.userKey === userKey && e.type === 'JOIN').length +
-    (type === 'JOIN' ? 1 : 0);
-
-  config.memberEvents.push({
-    room,
-    userKey,
-    userName,
-    type,
-    at: new Date().toISOString(),
-    count,
-  });
-
-  if (config.memberEvents.length > 2000) {
-    config.memberEvents.splice(0, config.memberEvents.length - 2000);
-  }
+  const count = config.memberEvents.filter(e => e.room === room && e.userKey === userKey && e.type === 'JOIN').length + (type === 'JOIN' ? 1 : 0);
+  config.memberEvents.push({ room, userKey, userName, type, at: new Date().toISOString(), count });
+  if (config.memberEvents.length > 2000) config.memberEvents.splice(0, config.memberEvents.length - 2000);
   return count;
 }
 
 function getRoomChatRanking(room: string): ChatStat[] {
-  return config.chatStats
-    .filter(s => s.room === room)
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 20);
+  return config.chatStats.filter(s => s.room === room).sort((a, b) => b.count - a.count).slice(0, 20);
 }
 
 function formatChatRanking(room: string): string {
   const ranking = getRoomChatRanking(room);
   if (!ranking.length) return '📊 아직 채팅 기록이 없습니다.';
-
   const lines = ['📊 채팅 순위', ''];
-  ranking.forEach((item, index) => {
-    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}위`;
-    lines.push(`${medal} ${item.userName} — ${item.count}회`);
-  });
+  ranking.forEach((item, index) => { const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}위`; lines.push(`${medal} ${item.userName} — ${item.count}회`); });
   return lines.join('\n');
 }
 
 function formatMemberLogs(room: string, limit = 100): string {
   const logs = config.memberEvents.filter(e => e.room === room).slice(-limit).reverse();
   if (!logs.length) return '📋 아직 입퇴장 기록이 없습니다.';
-
   const lines = ['📋 입퇴장 로그', ''];
   for (const event of logs) {
-    const time = new Intl.DateTimeFormat('ko-KR', {
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    }).format(new Date(event.at));
+    const time = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(event.at));
     const mark = event.type === 'JOIN' ? '[+]' : '[-]';
     const extra = event.type === 'JOIN' ? ` (${event.count}번째 입장)` : '';
     lines.push(`${mark} ${time} ${event.userName} — ${event.type === 'JOIN' ? '입장' : '퇴장'}${extra}`);
@@ -215,51 +178,24 @@ function formatMemberLogs(room: string, limit = 100): string {
 }
 
 function commandHelp(): string {
-  return [
-    '📖 명령어',
-    '',
-    '!핑 - 응답 확인',
-    '!명령어 - 명령어 목록',
-    '!echo <내용> - 내용 반복',
-    '!채팅순위 - 현재 방 채팅 순위',
-    '!입퇴장로그 - 최근 입퇴장 로그',
-    '!전체보기 - 최근 입퇴장 로그 전체 출력',
-    '!봇정보 - 현재 봇 상태',
-    '!봇등록 - 8자리 방 등록 코드 생성',
-    '!방등록해제 - 현재 채팅방 등록 해제',
-  ].join('\n');
+  return ['📖 명령어', '', '!핑 - 응답 확인', '!명령어 - 명령어 목록', '!echo <내용> - 내용 반복', '!채팅순위 - 현재 방 채팅 순위', '!입퇴장로그 - 최근 입퇴장 로그', '!전체보기 - 최근 입퇴장 로그 전체 출력', '!봇정보 - 현재 봇 상태', '!봇등록 - 8자리 방 등록 코드 생성', '!방등록해제 - 현재 채팅방 등록 해제'].join('\n');
 }
 
 async function startBot(): Promise<void> {
-  if (running) {
-    console.log('[!] 이미 실행 중입니다.');
-    return;
-  }
-
+  if (running) { console.log('[!] 이미 실행 중입니다.'); return; }
   activeAccount = config.accounts.find(a => a.email === config.activeAccount) || await chooseAccount();
   if (!activeAccount) return;
-
   running = true;
   console.log(`[+] 계정: ${activeAccount.email}`);
   console.log(`[+] 등록 방: ${roomListToString(config.rooms)}`);
   console.log('[+] node-kakao 연결 중...');
 
   const api = await AuthApiClient.create('loco-termux', activeAccount.deviceUuid);
-  const loginRes = await api.login({
-    email: activeAccount.email,
-    password: activeAccount.password,
-    forced: false,
-  });
-  if (!loginRes.success) {
-    running = false;
-    throw new Error(`Web login failed: ${loginRes.status}`);
-  }
+  const loginRes = await api.login({ email: activeAccount.email, password: activeAccount.password });
+  if (!loginRes.success) { running = false; throw new Error(`Web login failed: ${loginRes.status}`); }
 
   const result = await client.login(loginRes.result);
-  if (!result.success) {
-    running = false;
-    throw new Error(`KakaoTalk login failed: ${result.status}`);
-  }
+  if (!result.success) { running = false; throw new Error(`KakaoTalk login failed: ${result.status}`); }
   console.log('[✓] 로그인 성공. 봇 실행 중');
 }
 
@@ -267,143 +203,67 @@ client.on('chat', async (data, channel) => {
   const roomName = roomNameOf(channel);
   const text = data.text?.trim();
   if (!roomName || !text) return;
-
   const sender = data.getSenderInfo?.(channel);
-  if (sender) {
-    recordChat(roomName, sender);
-    scheduleSave();
-  }
-
-  if (text === `${config.prefix}봇등록`) {
-    printBotRegistrationCode();
-    return;
-  }
-
+  if (sender) { recordChat(roomName, sender); scheduleSave(); }
+  if (text === `${config.prefix}봇등록`) { printBotRegistrationCode(); return; }
   if (/^\d{8}$/.test(text) && pendingRegistration && Date.now() < pendingRegistration.expiresAt && text === pendingRegistration.code) {
     if (!config.rooms.includes(roomName)) config.rooms.push(roomName);
-    saveConfig(config);
-    pendingRegistration = null;
+    saveConfig(config); pendingRegistration = null;
     console.log(`[✓] 자동 방 등록: ${roomName}`);
-    await channel.sendChat('✓ 이 채팅방이 봇 방으로 등록되었습니다.');
-    return;
+    await channel.sendChat('✓ 이 채팅방이 봇 방으로 등록되었습니다.'); return;
   }
-
-  if (!isAllowedRoom(roomName)) return;
-  if (!text.startsWith(config.prefix)) return;
-
+  if (!isAllowedRoom(roomName) || !text.startsWith(config.prefix)) return;
   const [command, ...args] = text.slice(config.prefix.length).trim().split(/\s+/);
   const cmd = command?.toLowerCase();
-
-  if (cmd === 'ping' || cmd === '핑') {
-    await channel.sendChat('Pong!');
-  } else if (cmd === 'help' || cmd === '명령어') {
-    await channel.sendChat(commandHelp());
-  } else if (cmd === 'echo') {
-    await channel.sendChat(args.join(' ') || '사용법: !echo <내용>');
-  } else if (cmd === '채팅순위') {
-    await channel.sendChat(formatChatRanking(roomName));
-  } else if (cmd === '입퇴장로그') {
-    await channel.sendChat(formatMemberLogs(roomName, 50));
-  } else if (cmd === '전체보기') {
-    await channel.sendChat(formatMemberLogs(roomName, 100));
-  } else if (cmd === '봇정보') {
-    await channel.sendChat([
-      '🤖 LOCO TERMUX BOT',
-      `방: ${roomName}`,
-      `등록 방 수: ${config.rooms.length}`,
-      `채팅 기록: ${config.chatStats.filter(s => s.room === roomName).length}명`,
-      `입퇴장 기록: ${config.memberEvents.filter(e => e.room === roomName).length}건`,
-      '상태: 실행 중',
-    ].join('\n'));
-  } else if (cmd === '방등록해제') {
+  if (cmd === 'ping' || cmd === '핑') await channel.sendChat('Pong!');
+  else if (cmd === 'help' || cmd === '명령어') await channel.sendChat(commandHelp());
+  else if (cmd === 'echo') await channel.sendChat(args.join(' ') || '사용법: !echo <내용>');
+  else if (cmd === '채팅순위') await channel.sendChat(formatChatRanking(roomName));
+  else if (cmd === '입퇴장로그') await channel.sendChat(formatMemberLogs(roomName, 50));
+  else if (cmd === '전체보기') await channel.sendChat(formatMemberLogs(roomName, 100));
+  else if (cmd === '봇정보') await channel.sendChat(['🤖 LOCO TERMUX BOT', `방: ${roomName}`, `등록 방 수: ${config.rooms.length}`, `채팅 기록: ${config.chatStats.filter(s => s.room === roomName).length}명`, `입퇴장 기록: ${config.memberEvents.filter(e => e.room === roomName).length}건`, '상태: 실행 중'].join('\n'));
+  else if (cmd === '방등록해제') {
     const index = config.rooms.indexOf(roomName);
-    if (index === -1) {
-      await channel.sendChat('ℹ️ 이 채팅방은 등록되어 있지 않습니다.');
-      return;
-    }
-    config.rooms.splice(index, 1);
-    saveConfig(config);
-    console.log(`[✓] 방 등록 해제: ${roomName}`);
-    await channel.sendChat('✓ 이 채팅방의 봇 등록을 해제했습니다.');
+    if (index === -1) { await channel.sendChat('ℹ️ 이 채팅방은 등록되어 있지 않습니다.'); return; }
+    config.rooms.splice(index, 1); saveConfig(config);
+    console.log(`[✓] 방 등록 해제: ${roomName}`); await channel.sendChat('✓ 이 채팅방의 봇 등록을 해제했습니다.');
   }
 });
 
 client.on('user_join', async (joinLog, channel, user) => {
-  const roomName = roomNameOf(channel);
-  if (!roomName || !isAllowedRoom(roomName)) return;
-
-  const count = recordMemberEvent(roomName, user, 'JOIN');
-  saveConfig(config);
-
+  const roomName = roomNameOf(channel); if (!roomName || !isAllowedRoom(roomName)) return;
+  const count = recordMemberEvent(roomName, user, 'JOIN'); saveConfig(config);
   const name = userNameOf(user);
-  const message = count === 1
-    ? `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 첫 입장\n[+] 1번째 입장`
-    : `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 입장\n[+] ${count}번째 입장`;
-
-  console.log(`[JOIN] ${roomName} / ${name} / ${count}번째 입장`);
-  await channel.sendChat(message);
+  const message = count === 1 ? `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 첫 입장\n[+] 1번째 입장` : `@${name}님이 ${roomName}에 입장하셨습니다.\n\n[+] ${nowText()} 입장\n[+] ${count}번째 입장`;
+  console.log(`[JOIN] ${roomName} / ${name} / ${count}번째 입장`); await channel.sendChat(message);
 });
 
 client.on('user_left', async (leftLog, channel, user) => {
-  const roomName = roomNameOf(channel);
-  if (!roomName || !isAllowedRoom(roomName)) return;
-
-  recordMemberEvent(roomName, user, 'LEAVE');
-  saveConfig(config);
-
-  const name = userNameOf(user);
-  console.log(`[LEAVE] ${roomName} / ${name}`);
-  await channel.sendChat(`@${name}님이 ${roomName}에서 나가셨습니다.\n\n[+] ${nowText()} 퇴장`);
+  const roomName = roomNameOf(channel); if (!roomName || !isAllowedRoom(roomName)) return;
+  recordMemberEvent(roomName, user, 'LEAVE'); saveConfig(config);
+  const name = userNameOf(user); console.log(`[LEAVE] ${roomName} / ${name}`); await channel.sendChat(`@${name}님이 ${roomName}에서 나가셨습니다.\n\n[+] ${nowText()} 퇴장`);
 });
 
 client.on('error', error => console.error('[node-kakao] error:', error));
-client.on('disconnected', reason => {
-  running = false;
-  console.error('[node-kakao] disconnected:', reason);
-});
+client.on('disconnected', reason => { running = false; console.error('[node-kakao] disconnected:', reason); });
 
 async function menu(): Promise<void> {
   while (true) {
     banner();
-    console.log('[+] 1번 봇 시작');
-    console.log('[+] 2번 계정 등록');
-    console.log('[+] 3번 계정 목록');
-    console.log('[+] 4번 방 설정');
-    console.log('[+] 5번 설정 확인');
-    console.log('[+] 6번 종료');
+    console.log('[+] 1번 봇 시작'); console.log('[+] 2번 계정 등록'); console.log('[+] 3번 계정 목록'); console.log('[+] 4번 방 설정'); console.log('[+] 5번 설정 확인'); console.log('[+] 6번 종료');
     const rl = readline.createInterface({ input, output });
-    const choice = (await rl.question('\n선택 > ')).trim();
-    rl.close();
-
+    const choice = (await rl.question('\n선택 > ')).trim(); rl.close();
     try {
       if (choice === '1') await startBot();
       else if (choice === '2') await registerAccount();
-      else if (choice === '3') {
-        console.log('\n[+] 등록 계정');
-        config.accounts.forEach((a, i) => console.log(`[+] ${i + 1}번 ${a.email}${a.email === config.activeAccount ? ' (사용중)' : ''}`));
-      } else if (choice === '4') await roomSettings();
-      else if (choice === '5') {
-        console.log(`\n[+] 계정: ${config.activeAccount || '없음'}`);
-        console.log(`[+] 방: ${roomListToString(config.rooms)}`);
-        console.log(`[+] 접두사: ${config.prefix}`);
-        console.log(`[+] 채팅 통계: ${config.chatStats.length}건`);
-        console.log(`[+] 입퇴장 로그: ${config.memberEvents.length}건`);
-      } else if (choice === '6') {
-        if (saveTimer) clearTimeout(saveTimer);
-        saveConfig(config);
-        console.log('[✓] 종료합니다.');
-        process.exit(0);
-      } else console.log('[!] 1~6번 중에서 선택하세요.');
-    } catch (error) {
-      running = false;
-      console.error('[FATAL]', error);
-    }
-
+      else if (choice === '3') { console.log('\n[+] 등록 계정'); config.accounts.forEach((a, i) => console.log(`[+] ${i + 1}번 ${a.email}${a.email === config.activeAccount ? ' (사용중)' : ''}`)); }
+      else if (choice === '4') await roomSettings();
+      else if (choice === '5') { console.log(`\n[+] 계정: ${config.activeAccount || '없음'}`); console.log(`[+] 방: ${roomListToString(config.rooms)}`); console.log(`[+] 접두사: ${config.prefix}`); console.log(`[+] 채팅 통계: ${config.chatStats.length}건`); console.log(`[+] 입퇴장 로그: ${config.memberEvents.length}건`); }
+      else if (choice === '6') { if (saveTimer) clearTimeout(saveTimer); saveConfig(config); console.log('[✓] 종료합니다.'); process.exit(0); }
+      else console.log('[!] 1~6번 중에서 선택하세요.');
+    } catch (error) { running = false; console.error('[FATAL]', error); }
     await new Promise(resolve => setTimeout(resolve, 800));
   }
 }
 
-menu().catch(error => {
-  console.error('[FATAL]', error);
-  process.exitCode = 1;
-});
+menu().catch(error => { console.error('[FATAL]', error); process.exitCode = 1; });

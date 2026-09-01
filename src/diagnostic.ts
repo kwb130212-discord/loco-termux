@@ -14,7 +14,7 @@ export function printRuntimeDiagnostic(): void {
 
 export async function testAuthClient(account: Account): Promise<void> {
   console.log('\n[AUTH DIAGNOSTIC]');
-  console.log(`Account   : ${account.name}`);
+  console.log(`Account   : ${account.email}`);
   console.log('Stage     : AuthApiClient.create');
   try {
     const api = await AuthApiClient.create('loco-termux-diagnostic', account.deviceUuid);
