@@ -86,13 +86,7 @@ function recordChat(room: string, user: any): void {
   const stat = config.chatStats.find(s => s.room === room && s.userKey === userKey);
   if (stat) { stat.count++; stat.userName = userName; stat.lastSeenAt = now; }
   else config.chatStats.push({ room, userKey, userName, count: 1, firstSeenAt: now, lastSeenAt: now });
-}
-function recordMemberEvent(room: string, user: any, type: 'JOIN' | 'LEAVE'): number {
-  const userKey = userKeyOf(user), userName = userNameOf(user);
-  const count = config.memberEvents.filter(e => e.room === room && e.userKey === userKey && e.type === 'JOIN').length + (type === 'JOIN' ? 1 : 0);
-  config.memberEvents.push({ room, userKey, userName, type, at: new Date().toISOString(), count });
-  if (config.memberEvents.length > 2000) config.memberEvents.splice(0, config.memberEvents.length - 2000);
-  return count;
+  if (config.chatStats.length > 5000) config.chatStats.splice(0, config.chatStats.length - 5000);
 }
 function overview(title: string, body: string): string { return [`📋 ${title}`, '', '[전체보기]', '', body].join('\n'); }
 function formatChatRanking(room: string): string {
@@ -143,24 +137,24 @@ async function handleKickReply(data: any, channel: any, roomName: string): Promi
   const actorKey = userKeyOf(actor), actorName = userNameOf(actor);
   if (!analyzer.isAdmin(actorKey)) {
     analyzer.logCommand(roomName, actorKey, actorName, 'kick', 'DENIED_ADMIN_ONLY');
-    await channel.sendChat('⛔ 관리자만 가능합니다.'); return true;
+    await channel.sendChat(overview('강퇴', '⛔ 관리자만 가능합니다.')); return true;
   }
   const replyId = extractReplyId(data);
   const target = replyId ? analyzer.findLeaveByMessage(roomName, replyId) : undefined;
   if (!target) {
     analyzer.logCommand(roomName, actorKey, actorName, 'kick', 'DENIED_TARGET_NOT_FOUND');
-    await channel.sendChat('⚠️ 퇴장 안내 메시지에 답장해서 kick을 입력해주세요.'); return true;
+    await channel.sendChat(overview('강퇴', '⚠️ 퇴장 안내 메시지에 답장해서 kick을 입력해주세요.')); return true;
   }
   try {
     if (!(await trySupportedKick(channel, target.userKey))) {
       analyzer.logCommand(roomName, actorKey, actorName, 'kick', 'UNSUPPORTED_TRANSPORT');
-      await channel.sendChat('⚠️ 현재 연결된 채널에서 지원되는 관리자 강퇴 기능을 찾지 못했습니다.'); return true;
+      await channel.sendChat(overview('강퇴', '⚠️ 현재 연결된 채널에서 지원되는 관리자 강퇴 기능을 찾지 못했습니다.')); return true;
     }
     analyzer.logCommand(roomName, actorKey, actorName, 'kick', `SUCCESS:${target.userKey}`);
-    await channel.sendChat(`✓ ${target.userName}님을 내보냈습니다.\n실행자: ${actorName}`);
+    await channel.sendChat(overview('강퇴', `✓ ${target.userName}님을 내보냈습니다.\n실행자: ${actorName}`));
   } catch (error) {
     console.error('[KICK]', error); analyzer.logCommand(roomName, actorKey, actorName, 'kick', 'FAILED');
-    await channel.sendChat(`❌ ${target.userName}님 내보내기에 실패했습니다.`);
+    await channel.sendChat(overview('강퇴', `❌ ${target.userName}님 내보내기에 실패했습니다.`));
   }
   return true;
 }
@@ -187,7 +181,7 @@ client.on('chat', async (data, channel) => {
   if (text === `${config.prefix}봇등록`) { printBotRegistrationCode(); return; }
   if (/^\d{8}$/.test(text) && pendingRegistration && Date.now() < pendingRegistration.expiresAt && text === pendingRegistration.code) {
     if (!config.rooms.includes(roomName)) config.rooms.push(roomName);
-    pendingRegistration = null; saveConfig(config); await channel.sendChat('✓ 이 채팅방이 봇 방으로 등록되었습니다.'); return;
+    pendingRegistration = null; saveConfig(config); await channel.sendChat(overview('방 등록', '✓ 이 채팅방이 봇 방으로 등록되었습니다.')); return;
   }
   if (!text.startsWith(config.prefix)) return;
   const [command, ...args] = text.slice(config.prefix.length).trim().split(/\s+/), cmd = command?.toLowerCase();
@@ -206,20 +200,18 @@ client.on('chat', async (data, channel) => {
 
 client.on('user_join', async (_joinLog, channel, user) => {
   const roomName = roomNameOf(channel); if (!roomName || !isAllowedRoom(roomName)) return;
-  const count = recordMemberEvent(roomName, user, 'JOIN'); saveConfig(config);
-  const name = userNameOf(user);
-  await channel.sendChat(overview('입장 알림', `${name}님이 나가 아니라 방에 입장하셨습니다.\n\n${name} 님이 ${nowText()}에 입장하셨습니다.\n${count}번째 입장`));
+  const key = userKeyOf(user), name = userNameOf(user);
+  const count = analyzer.recordJoin(roomName, key, name);
+  await channel.sendChat(overview('입장 알림', `${name}님이 방에 입장하셨습니다.\n\n${name} 님이 ${timeOf()}에 입장하셨습니다.\n${count}번째 입장`));
 });
 
 client.on('user_left', async (_leftLog, channel, user) => {
   const roomName = roomNameOf(channel); if (!roomName || !isAllowedRoom(roomName)) return;
   const name = userNameOf(user), key = userKeyOf(user);
-  recordMemberEvent(roomName, user, 'LEAVE');
   const record = analyzer.recordLeave(roomName, key, name);
   const result = await channel.sendChat(analyzer.leaveText(record));
   const messageId = extractSentMessageId(result);
-  if (messageId) analyzer.recordLeave(roomName, key, name, messageId);
-  saveConfig(config);
+  if (messageId) analyzer.setLeaveMessageId(roomName, key, messageId);
 });
 
 client.on('error', error => console.error('[node-kakao] error:', error));
