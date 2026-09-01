@@ -4,8 +4,9 @@ from __future__ import annotations
 
 Protocol-agnostic event/state layer. Authentication is deliberately kept out
 of this module: it records observable events and diagnostics supplied by the
-transport layer, but never fabricates sessions/tokens or attempts to bypass
-server-side permissions.
+transport layer, but never fabricates real sessions/tokens or bypasses
+server-side permissions. A clearly isolated MOCK login is provided only for
+local analyzer/UI testing.
 """
 
 from dataclasses import dataclass, asdict
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import json
 import threading
+import uuid
 
 
 @dataclass
@@ -46,6 +48,17 @@ class SessionDiagnostic:
     detail: Optional[str] = None
 
 
+@dataclass
+class MockSession:
+    """Local-only test session. Never represents a real server credential."""
+    user_id: str
+    nickname: str
+    session_id: str
+    created_at: str
+    mode: str = "MOCK"
+    authenticated: bool = True
+
+
 class LocoAnalyzer:
     """Thread-safe room/member analyzer with persistent state and diagnostics."""
 
@@ -65,6 +78,10 @@ class LocoAnalyzer:
         self.join_counts: Dict[str, int] = {}
         self.online: Dict[str, Dict[str, str]] = {}
         self.session_diagnostics: List[SessionDiagnostic] = []
+
+        # Intentionally memory-only: mock sessions must never be persisted as
+        # real authentication state.
+        self.mock_sessions: Dict[str, MockSession] = {}
         self._load()
 
     @staticmethod
@@ -145,8 +162,70 @@ class LocoAnalyzer:
         if len(self.events) > self.max_events:
             del self.events[:-self.max_events]
 
+    # ------------------------------------------------------------------
+    # Local MOCK authentication for testing only
+    # ------------------------------------------------------------------
+    def mock_login(self, user_id: str, nickname: str, room_id: str = "local") -> MockSession:
+        """Create a local-only test session and connect it to analyzer state.
+
+        This deliberately generates a value that is meaningful only inside
+        this process. It is not an OAuth/LOCO token and is never persisted.
+        """
+        user_id = str(user_id).strip()
+        nickname = str(nickname).strip() or "알 수 없음"
+        room_id = str(room_id).strip() or "local"
+        if not user_id:
+            raise ValueError("user_id must not be empty")
+
+        with self._lock:
+            now = self._now()
+            session = MockSession(
+                user_id=user_id,
+                nickname=nickname,
+                session_id=f"mock_{uuid.uuid4().hex[:12]}",
+                created_at=now,
+            )
+            self.mock_sessions[session.session_id] = session
+
+            # Reuse the normal analyzer state path; no auth token is created.
+            key = self._member_key(room_id, user_id)
+            count = self.join_counts.get(key, 0) + 1
+            self.join_counts[key] = count
+            self.online[key] = {"user_id": user_id, "nickname": nickname}
+            self.pending_leaves.pop(key, None)
+            self._append_event(MemberEvent(room_id, user_id, nickname, "JOIN", now, count, None))
+            self._save()
+
+            print(
+                f"[MOCK LOGIN] 성공\n"
+                f"사용자: {nickname}\n"
+                f"ID: {user_id}\n"
+                f"Session: {session.session_id}\n"
+                f"Mode: MOCK"
+            )
+            return session
+
+    def mock_logout(self, session_id: str) -> bool:
+        """Remove a local mock session. No server-side logout is attempted."""
+        with self._lock:
+            session = self.mock_sessions.pop(str(session_id), None)
+            if session is None:
+                return False
+
+            for key, member in list(self.online.items()):
+                if member.get("user_id") == session.user_id:
+                    self.online.pop(key, None)
+
+            self._save()
+            print(f"[MOCK LOGOUT] {session.nickname}")
+            return True
+
+    def mock_sessions_list(self) -> List[MockSession]:
+        with self._lock:
+            return list(self.mock_sessions.values())
+
     def user_joined(self, room_id: str, user: object, message_id: Optional[str] = None) -> int:
-        room_id, _ = str(room_id), None
+        room_id = str(room_id)
         user_id, nickname = self._safe_user(user)
         key = self._member_key(room_id, user_id)
         with self._lock:
@@ -224,7 +303,6 @@ class LocoAnalyzer:
         with self._lock:
             if room_id is not None:
                 return self.pending_leaves.get(self._member_key(str(room_id), str(user_id)))
-            # Backward-compatible lookup when the caller has no room ID.
             for leave in reversed(list(self.pending_leaves.values())):
                 if leave.user_id == str(user_id):
                     return leave
@@ -251,7 +329,10 @@ class LocoAnalyzer:
 
     def room_members(self, room_id: str) -> List[Dict[str, str]]:
         with self._lock:
-            return list(self.online.get(k) for k in self.online if k.startswith(f"{room_id}\x1f") and self.online.get(k))
+            return [
+                member for key, member in self.online.items()
+                if key.startswith(f"{room_id}\x1f") and member
+            ]
 
     def room_events(self, room_id: str, limit: int = 100) -> List[MemberEvent]:
         with self._lock:
@@ -275,8 +356,10 @@ class LocoAnalyzer:
 
 if __name__ == "__main__":
     analyzer = LocoAnalyzer()
-    analyzer.user_joined("room_1", {"user_id": "demo", "nickname": "Demo"})
-    analyzer.record_session_diagnostic("demo", None, "UNAUTHENTICATED", "-999", "observed by transport")
+
+    # Local mock-login smoke test. This does NOT contact Kakao/LOCO.
+    session = analyzer.mock_login("demo", "Demo", "room_1")
     print("LOCO Analyzer ready")
     print(analyzer.stats("room_1"))
     print(analyzer.diagnose_999("demo"))
+    print("Mock logout:", analyzer.mock_logout(session.session_id))
