@@ -1,23 +1,32 @@
 import { AuthApiClient, api } from 'node-kakao';
 
 /**
- * Compatibility configuration for current KakaoTalk authentication servers.
- * Values can be overridden without editing source:
+ * Authentication compatibility/diagnostic layer.
+ *
+ * Do not hard-code a guessed KakaoTalk version here. A stale or fabricated
+ * version can itself trigger -999 (upgrade required). Values may be supplied
+ * by the user/environment when they are known to be valid:
  *   LOCO_AGENT=android
- *   LOCO_APP_VERSION=26.5.0
- *   LOCO_DEVICE_MODEL=SM-T976N
- *   LOCO_MCCMNC=999
- *   LOCO_NET_TYPE=0
+ *   LOCO_APP_VERSION=...
+ *   LOCO_DEVICE_MODEL=...
+ *   LOCO_MCCMNC=...
+ *   LOCO_NET_TYPE=...
+ *
+ * When a value is not supplied, node-kakao's own defaults are preserved.
  */
-const config = {
-  agent: process.env.LOCO_AGENT || 'android',
-  mccmnc: process.env.LOCO_MCCMNC || '999',
-  deviceModel: process.env.LOCO_DEVICE_MODEL || 'SM-T976N',
-  appVersion: process.env.LOCO_APP_VERSION || '26.5.0',
-  version: process.env.LOCO_APP_VERSION || '26.5.0',
-  netType: Number(process.env.LOCO_NET_TYPE || '0'),
-  subDevice: true,
-};
+const overrides: Record<string, unknown> = {};
+
+if (process.env.LOCO_AGENT) overrides.agent = process.env.LOCO_AGENT;
+if (process.env.LOCO_APP_VERSION) {
+  overrides.appVersion = process.env.LOCO_APP_VERSION;
+  overrides.version = process.env.LOCO_APP_VERSION;
+}
+if (process.env.LOCO_DEVICE_MODEL) overrides.deviceModel = process.env.LOCO_DEVICE_MODEL;
+if (process.env.LOCO_MCCMNC) overrides.mccmnc = process.env.LOCO_MCCMNC;
+if (process.env.LOCO_NET_TYPE) {
+  const netType = Number(process.env.LOCO_NET_TYPE);
+  if (Number.isFinite(netType)) overrides.netType = netType;
+}
 
 const originalCreate = AuthApiClient.create.bind(AuthApiClient);
 (AuthApiClient as any).create = async (
@@ -26,7 +35,13 @@ const originalCreate = AuthApiClient.create.bind(AuthApiClient);
   existingConfig: Record<string, unknown> = {},
   xvcProvider?: unknown,
 ) => {
-  const merged = { ...config, ...existingConfig };
+  const merged = { ...existingConfig, ...overrides };
+  console.log(
+    `[AUTH] agent=${String(merged.agent ?? 'default')} ` +
+    `appVersion=${String(merged.appVersion ?? 'default')} ` +
+    `deviceModel=${String(merged.deviceModel ?? 'default')}`,
+  );
+
   return originalCreate(
     name,
     deviceUUID,
@@ -34,7 +49,3 @@ const originalCreate = AuthApiClient.create.bind(AuthApiClient);
     xvcProvider || api.xvc.AndroidSubXVCProvider,
   );
 };
-
-console.log(
-  `[AUTH] client=${config.agent} version=${config.version} model=${config.deviceModel} net=${config.netType}`,
-);
