@@ -11,6 +11,7 @@ let authStatus = '미인증';
 let sessionId = '';
 let lastAuthError = '';
 let busy = false;
+let restoring = false;
 
 async function ask(prompt: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
@@ -28,17 +29,67 @@ function runPythonSync(args: string[], timeout = 60_000) {
   return last;
 }
 
-function restoreSession(): void {
-  if (!activeAccount || !config.kakao.clientId) return;
-  const result = runPythonSync(['분석기_cli.py', '--status', '--client-id', config.kakao.clientId, '--client-secret', config.kakao.clientSecret]);
-  if (!result || result.error) return;
+async function restoreSession(): Promise<void> {
+  if (restoring || !activeAccount || !config.kakao.clientId) return;
+  restoring = true;
+  authStatus = '세션 복구중';
+  const candidates = [process.env.PYTHON_BIN, 'python3', 'python'].filter(Boolean) as string[];
+  let child: ReturnType<typeof spawn> | null = null;
+  let stdout = '';
+
   try {
-    const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+    for (const command of candidates) {
+      const attempt = spawn(command, [
+        '분석기_cli.py', '--status',
+        '--client-id', config.kakao.clientId,
+        '--client-secret', config.kakao.clientSecret,
+      ], {
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const ok = await new Promise<boolean>(resolve => {
+        let settled = false;
+        attempt.once('spawn', () => { settled = true; resolve(true); });
+        attempt.once('error', () => { if (!settled) resolve(false); });
+      });
+      if (ok) { child = attempt; break; }
+    }
+
+    if (!child) return;
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', chunk => { stdout += String(chunk); });
+
+    const result = await new Promise<{ code: number | null; error?: string }>(resolve => {
+      const timer = setTimeout(() => {
+        child?.kill('SIGTERM');
+        resolve({ code: null, error: 'session restore timeout' });
+      }, 10_000);
+      child!.once('close', code => { clearTimeout(timer); resolve({ code }); });
+      child!.once('error', error => { clearTimeout(timer); resolve({ code: 1, error: error.message }); });
+    });
+
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
     const payload = JSON.parse(lines.at(-1) ?? '');
-    if (payload.ok && payload.authenticated) {
-      loggedIn = true; authStatus = '성공'; sessionId = `oauth_${payload.user_id}`; lastAuthError = '';
-    } else if (payload.reason) { loggedIn = false; authStatus = '미인증'; sessionId = ''; }
-  } catch { /* best effort */ }
+    if (result.code === 0 && payload.ok && payload.authenticated) {
+      loggedIn = true;
+      authStatus = '성공';
+      sessionId = `oauth_${payload.user_id}`;
+      lastAuthError = '';
+    } else {
+      loggedIn = false;
+      sessionId = '';
+      authStatus = '미인증';
+      if (payload?.reason && payload.reason !== 'no_saved_session') lastAuthError = String(payload.reason);
+      else if (result.error) lastAuthError = result.error;
+    }
+  } catch (error) {
+    loggedIn = false;
+    sessionId = '';
+    authStatus = '미인증';
+    lastAuthError = error instanceof Error ? error.message : String(error);
+  } finally {
+    restoring = false;
+  }
 }
 
 async function login(): Promise<void> {
@@ -117,10 +168,12 @@ function updateTermux(): void {
 
 function showPanel(): void {
   console.clear();
-  console.log('========================================'); console.log('          LOCO-TERMUX ULTRA             '); console.log('========================================');
+  console.log('========================================');
+  console.log('          LOCO-TERMUX ULTRA             ');
+  console.log('========================================');
   console.log(`계정 : ${activeAccount?.email ?? config.activeAccount ?? '없음'}`);
   console.log(`인증 : ${loggedIn ? '성공' : authStatus}`);
-  console.log(`세션 : ${sessionId || (loggedIn ? 'persistent' : '없음')}`);
+  console.log(`세션 : ${sessionId || (loggedIn ? 'persistent' : restoring ? '복구중' : '없음')}`);
   if (lastAuthError) console.log(`오류 : ${lastAuthError.slice(0, 160)}`);
   console.log('----------------------------------------');
   console.log('1. 계정 등록/선택'); console.log('2. Kakao OAuth 로그인'); console.log('3. OAuth 설정'); console.log('4. 현재 상태/세션 재검증'); console.log('5. GitHub 최신버전 업데이트'); console.log('6. Kakao 로그아웃'); console.log('7. 종료');
@@ -139,7 +192,7 @@ async function selectAccount(): Promise<void> {
   console.log('\n등록 계정'); config.accounts.forEach((a, i) => console.log(`${i + 1}. ${a.email}`));
   const raw = await ask('번호(엔터=현재): '); const current = config.accounts.findIndex(a => a.email === config.activeAccount); const index = raw ? Number(raw) - 1 : (current >= 0 ? current : 0);
   if (!Number.isInteger(index) || index < 0 || index >= config.accounts.length) return;
-  activeAccount = config.accounts[index]; config.activeAccount = activeAccount.email; saveConfig(config); loggedIn = false; sessionId = ''; authStatus = '미인증'; restoreSession();
+  activeAccount = config.accounts[index]; config.activeAccount = activeAccount.email; saveConfig(config); loggedIn = false; sessionId = ''; authStatus = '미인증'; await restoreSession();
 }
 
 async function configureOAuth(): Promise<void> {
@@ -149,12 +202,19 @@ async function configureOAuth(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  restoreSession();
+  // Draw the panel first. Session restoration runs in the background so the
+  // Termux UI is never held up by Python startup or a network refresh.
+  showPanel();
+  void restoreSession().then(() => showPanel());
   while (true) {
-    showPanel(); const choice = await ask('> ');
-    if (choice === '1') await selectAccount(); else if (choice === '2') await login(); else if (choice === '3') await configureOAuth();
-    else if (choice === '4') { restoreSession(); console.log(`\n상태=${authStatus}\n로그인=${loggedIn}\n세션=${sessionId || '없음'}`); if (lastAuthError) console.log(`오류=${lastAuthError}`); await ask('엔터 > '); }
-    else if (choice === '5') updateTermux(); else if (choice === '6') await logout(); else if (choice === '7' || choice === 'exit') { saveConfig(config); return; }
+    const choice = await ask('> ');
+    if (choice === '1') await selectAccount();
+    else if (choice === '2') await login();
+    else if (choice === '3') await configureOAuth();
+    else if (choice === '4') { await restoreSession(); showPanel(); console.log(`\n상태=${authStatus}\n로그인=${loggedIn}\n세션=${sessionId || '없음'}`); if (lastAuthError) console.log(`오류=${lastAuthError}`); await ask('엔터 > '); }
+    else if (choice === '5') updateTermux();
+    else if (choice === '6') await logout();
+    else if (choice === '7' || choice === 'exit') { saveConfig(config); return; }
   }
 }
 
