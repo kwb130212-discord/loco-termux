@@ -7,15 +7,20 @@ Node.js + TypeScript Termux bridge using the repository's Python analyzer and Ka
 - TypeScript + strict compiler configuration
 - Python analyzer as the canonical room/event state layer
 - Real Kakao OAuth authorization-code authentication
+- Fast local-session restoration on startup
 - Termux interactive account and OAuth configuration
 - No Kakao account password is stored or submitted by this project
 - Local persistent configuration at `~/.loco-termux/config.json`
 - Configuration directory `0700` and config file `0600` where supported
 - Multiple account entries with persistent device UUIDs
 - Room allow-list and per-room enabled state
+- Room management/export CLI
+- Observed room list, online member list and read-observer lookup
+- JSON/CSV event export
 - Admin/moderator configuration
 - Chat statistics
 - Join/leave event history
+- Read-observer event history
 - Command audit log
 - 8-digit `!봇등록` room registration code with a 5-minute lifetime
 - `!핑`, `!명령어`, `!echo`, `!채팅순위`, `!입퇴장로그`, `!봇정보`, `!봇등록`, `!방등록해제`
@@ -43,6 +48,7 @@ The authentication path is now:
 
 ```text
 Termux panel
+  -> local session fast-path
   -> 분석기_cli.py
   -> 분석기_auth.py
   -> Kakao OAuth authorization endpoint
@@ -60,6 +66,35 @@ Kakao's OAuth flow requires a REST API key and a registered redirect URI. If the
 For a local Termux callback, the analyzer supports an explicit `http://127.0.0.1:<port>/...` or `http://localhost:<port>/...` redirect URI. Other registered redirect URIs can use the manual callback-URL input mode.
 
 Authentication failures are surfaced as failures. They are recorded as diagnostics rather than converted into successful sessions.
+
+## Room management / export
+
+The new `방관리_cli.py` works with rooms and events that LOCO-Termux has actually observed or explicitly registered. It does not fabricate undocumented Kakao Open Chat REST endpoints.
+
+```bash
+# 방 목록
+npm run rooms
+
+# 방 등록/활성화/비활성화/삭제
+npm run room:add -- ROOM_ID
+npm run room:enable -- ROOM_ID
+npm run room:disable -- ROOM_ID
+npm run room:remove -- ROOM_ID
+
+# 현재 관측된 멤버
+npm run room:members -- ROOM_ID
+
+# 특정 메시지의 읽은 사람
+npm run room:readers -- MESSAGE_ID
+
+# 전체 이벤트 JSON 내보내기
+npm run room:export -- --format json --output loco-export.json
+
+# 특정 방 CSV 내보내기
+npm run room:export -- --room-id ROOM_ID --format csv --output room.csv
+```
+
+`읽은 사람` 기능은 분석기에서 실제 `record_read()` 이벤트가 들어온 사용자만 표시합니다. 즉, 이벤트 수집 계층이 제공하지 않는 읽음 정보를 임의로 추정하지 않습니다.
 
 ## Panel
 
