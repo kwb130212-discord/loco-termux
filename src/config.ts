@@ -3,7 +3,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 
-export type Account = { email: string; password: string; deviceUuid: string };
+export type Account = { email: string; deviceUuid: string };
+export type KakaoOAuthConfig = { clientId: string; clientSecret: string; redirectUri: string };
 export type RoomConfig = { name: string; enabled: boolean };
 export type ChatStat = { room: string; userKey: string; userName: string; count: number; firstSeenAt: string; lastSeenAt: string };
 export type MemberEvent = { room: string; userKey: string; userName: string; type: 'JOIN' | 'LEAVE'; at: string; count: number };
@@ -14,6 +15,7 @@ export type Config = {
   rooms: string[];
   accounts: Account[];
   activeAccount: string | null;
+  kakao: KakaoOAuthConfig;
   roomConfigs: Record<string, RoomConfig>;
   admins: string[];
   moderators: string[];
@@ -75,27 +77,35 @@ function normalizeCommandLogs(value: unknown): CommandLog[] {
 export function loadConfig(): Config {
   ensureDataDir();
   const defaults: Config = {
-    prefix: '!', rooms: [], accounts: [], activeAccount: null, roomConfigs: {}, admins: [], moderators: [], logLevel: 'info',
+    prefix: '!', rooms: [], accounts: [], activeAccount: null,
+    kakao: { clientId: '', clientSecret: '', redirectUri: '' },
+    roomConfigs: {}, admins: [], moderators: [], logLevel: 'info',
     chatStats: [], memberEvents: [], commandLogs: [], webhook: { enabled: false, url: '', username: 'LOCO-Termux Logger' },
   };
   if (!fs.existsSync(CONFIG_FILE)) return defaults;
   try {
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config> & { accounts?: Array<Partial<Account> & { name?: string }> };
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as any;
     const accounts: Account[] = Array.isArray(parsed.accounts)
-      ? parsed.accounts.filter(a => a && typeof a.email === 'string' && typeof a.password === 'string').map(a => ({
-          email: a.email!.trim(), password: a.password!,
+      ? parsed.accounts.filter((a: any) => a && typeof a.email === 'string').map((a: any) => ({
+          email: a.email.trim(),
           deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid.trim() ? a.deviceUuid.trim() : crypto.randomUUID(),
         })).filter(a => a.email) : [];
     const rooms = stringList(parsed.rooms);
-    const rawRoomConfigs = parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs as Record<string, any> : {};
+    const rawRoomConfigs = parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs : {};
     const roomConfigs: Record<string, RoomConfig> = {};
     for (const room of rooms) roomConfigs[room] = { name: room, enabled: rawRoomConfigs[room]?.enabled !== false };
-    const rawWebhook = parsed.webhook && typeof parsed.webhook === 'object' ? parsed.webhook as Partial<WebhookConfig> : {};
+    const rawKakao = parsed.kakao && typeof parsed.kakao === 'object' ? parsed.kakao : {};
+    const rawWebhook = parsed.webhook && typeof parsed.webhook === 'object' ? parsed.webhook : {};
     return {
       ...defaults,
       prefix: typeof parsed.prefix === 'string' && parsed.prefix.trim() ? parsed.prefix.trim().slice(0, 8) : defaults.prefix,
       rooms, accounts,
       activeAccount: typeof parsed.activeAccount === 'string' && accounts.some(a => a.email === parsed.activeAccount) ? parsed.activeAccount : accounts[0]?.email ?? null,
+      kakao: {
+        clientId: typeof rawKakao.clientId === 'string' ? rawKakao.clientId.trim() : '',
+        clientSecret: typeof rawKakao.clientSecret === 'string' ? rawKakao.clientSecret.trim() : '',
+        redirectUri: typeof rawKakao.redirectUri === 'string' ? rawKakao.redirectUri.trim() : '',
+      },
       roomConfigs, admins: stringList(parsed.admins), moderators: stringList(parsed.moderators),
       logLevel: parsed.logLevel === 'debug' ? 'debug' : 'info', chatStats: normalizeStats(parsed.chatStats),
       memberEvents: normalizeEvents(parsed.memberEvents), commandLogs: normalizeCommandLogs(parsed.commandLogs),
@@ -115,8 +125,14 @@ export function saveConfig(config: Config): void {
   ensureDataDir();
   const tmp = `${CONFIG_FILE}.${process.pid}.tmp`;
   const safe: Config = {
-    ...config, rooms: stringList(config.rooms), admins: stringList(config.admins), moderators: stringList(config.moderators),
+    ...config,
+    rooms: stringList(config.rooms), admins: stringList(config.admins), moderators: stringList(config.moderators),
     chatStats: config.chatStats.slice(-MAX_STATS), memberEvents: config.memberEvents.slice(-MAX_EVENTS), commandLogs: config.commandLogs.slice(-MAX_COMMAND_LOGS),
+    kakao: {
+      clientId: String(config.kakao.clientId ?? '').trim(),
+      clientSecret: String(config.kakao.clientSecret ?? '').trim(),
+      redirectUri: String(config.kakao.redirectUri ?? '').trim(),
+    },
     webhook: { enabled: config.webhook.enabled === true, url: String(config.webhook.url ?? '').trim(), username: String(config.webhook.username ?? 'LOCO-Termux Logger').slice(0, 80) },
   };
   fs.writeFileSync(tmp, JSON.stringify(safe, null, 2), { encoding: 'utf8', mode: 0o600 });
