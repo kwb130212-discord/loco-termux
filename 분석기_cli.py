@@ -14,6 +14,7 @@ from 분석기_auth import (
     delete_session,
     load_session,
     login_interactive,
+    login_qr_interactive,
     logout_session,
     refresh_session,
     save_session,
@@ -24,6 +25,7 @@ from 분석기_auth import (
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oauth-login", action="store_true")
+    parser.add_argument("--qr-login", action="store_true", help="공식 Kakao OAuth URL을 QR로 표시")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--logout", action="store_true")
     parser.add_argument("--client-id", default="")
@@ -49,9 +51,6 @@ def main() -> int:
         if not session:
             print(json.dumps({"ok": False, "authenticated": False, "reason": "no_saved_session"}, ensure_ascii=False)); return 0
         try:
-            # Fast path: an unexpired locally stored access token is enough to
-            # restore the UI immediately. Full API validation is only needed
-            # after expiry; the normal login path still validates when needed.
             if not session.needs_refresh():
                 print(json.dumps({"ok": True, "authenticated": True, "user_id": session.user_id, "nickname": session.nickname, "expires_at": session.access_expires_at()}, ensure_ascii=False))
                 return 0
@@ -65,8 +64,8 @@ def main() -> int:
         except KakaoOAuthError as exc:
             print(json.dumps({"ok": False, "authenticated": False, "reason": str(exc)}, ensure_ascii=False)); return 0
 
-    if not args.oauth_login:
-        print(json.dumps({"ok": False, "error": "oauth_login_required"}, ensure_ascii=False)); return 2
+    if not args.oauth_login and not args.qr_login:
+        print(json.dumps({"ok": False, "error": "oauth_login_or_qr_login_required"}, ensure_ascii=False)); return 2
     if not args.client_id:
         print(json.dumps({"ok": False, "error": "client_id_required"}, ensure_ascii=False)); return 2
     if not args.redirect_uri:
@@ -90,7 +89,10 @@ def main() -> int:
         if not session:
             captured = io.StringIO()
             with contextlib.redirect_stdout(captured):
-                session = login_interactive(args.client_id, args.client_secret, args.redirect_uri, args.login_hint)
+                if args.qr_login:
+                    session = login_qr_interactive(args.client_id, args.client_secret, args.redirect_uri, args.login_hint)
+                else:
+                    session = login_interactive(args.client_id, args.client_secret, args.redirect_uri, args.login_hint)
             if captured.getvalue().strip(): print(captured.getvalue().strip(), file=sys.stderr)
             save_session(session, args.session_file)
 
