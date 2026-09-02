@@ -7,36 +7,64 @@ import contextlib
 import io
 import json
 import sys
+from pathlib import Path
 from 분석기 import LocoAnalyzer
-from 분석기_auth import KakaoOAuthError, load_session, login_interactive, refresh_session, save_session, validate_session
+from 분석기_auth import (
+    DEFAULT_REDIRECT_URI,
+    KakaoOAuthError,
+    delete_session,
+    load_session,
+    login_interactive,
+    logout_session,
+    refresh_session,
+    save_session,
+    validate_session,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--oauth-login", action="store_true")
+    parser.add_argument("--logout", action="store_true")
     parser.add_argument("--client-id", default="")
     parser.add_argument("--client-secret", default="")
-    parser.add_argument("--redirect-uri", default="")
+    parser.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI)
     parser.add_argument("--login-hint", default="")
     parser.add_argument("--session-file", default="~/.loco-termux/kakao-session.json")
     args = parser.parse_args()
 
+    if args.logout:
+        try:
+            session = load_session(args.session_file)
+            if session:
+                logout_session(session)
+            delete_session(args.session_file)
+            print(json.dumps({"ok": True, "logged_out": True}, ensure_ascii=False))
+            return 0
+        except KakaoOAuthError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)); return 1
+
     if not args.oauth_login:
         print(json.dumps({"ok": False, "error": "oauth_login_required"}, ensure_ascii=False)); return 2
-    if not args.client_id or not args.redirect_uri:
-        print(json.dumps({"ok": False, "error": "client_id_and_redirect_uri_required"}, ensure_ascii=False)); return 2
+    if not args.client_id:
+        print(json.dumps({"ok": False, "error": "client_id_required"}, ensure_ascii=False)); return 2
+    if not args.redirect_uri:
+        print(json.dumps({"ok": False, "error": "redirect_uri_required"}, ensure_ascii=False)); return 2
 
     try:
         session = load_session(args.session_file)
         if session:
-            if session.needs_refresh():
-                if session.refresh_token:
-                    session = refresh_session(args.client_id, args.client_secret, session)
-                    save_session(session, args.session_file)
-                else:
-                    session = None
-            if session:
-                validate_session(session)
+            try:
+                if session.needs_refresh():
+                    if session.refresh_token:
+                        session = refresh_session(args.client_id, args.client_secret, session)
+                        save_session(session, args.session_file)
+                    else:
+                        session = None
+                if session:
+                    validate_session(session)
+            except KakaoOAuthError:
+                session = None
 
         if not session:
             captured = io.StringIO()
