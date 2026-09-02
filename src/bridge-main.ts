@@ -144,25 +144,90 @@ async function login(): Promise<void> {
     console.log('[!] 먼저 OAuth 설정을 입력하세요.');
     return;
   }
+
   authStatus = '인증중';
-  console.log('[LOGIN] 실제 Kakao OAuth 인증 시작');
-  const result = runPython([
-    '분석기_cli.py', '--oauth-login', '--client-id', config.kakao.clientId,
-    '--client-secret', config.kakao.clientSecret, '--redirect-uri', config.kakao.redirectUri,
-    '--login-hint', account.email,
-  ]);
-  if (!result || result.error) {
+  loggedIn = false;
+  sessionId = '';
+  showPanel();
+  console.log('\n[LOGIN] 실제 Kakao OAuth 인증 시작');
+  console.log('[LOGIN] 브라우저에서 Kakao 로그인을 완료하세요.');
+  console.log('[LOGIN] 인증이 끝나면 자동으로 이 화면으로 돌아옵니다.');
+
+  const candidates = [process.env.PYTHON_BIN, 'python3', 'python'].filter(Boolean) as string[];
+  let child: ReturnType<typeof spawn> | null = null;
+  let spawnError: Error | null = null;
+
+  for (const command of candidates) {
+    const attempt = spawn(command, [
+      '분석기_cli.py', '--oauth-login', '--client-id', config.kakao.clientId,
+      '--client-secret', config.kakao.clientSecret, '--redirect-uri', config.kakao.redirectUri,
+      '--login-hint', account.email,
+    ], {
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child = attempt;
+    const failed = await new Promise<boolean>(resolve => {
+      let settled = false;
+      const onError = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        spawnError = error;
+        resolve(true);
+      };
+      attempt.once('error', onError);
+      attempt.once('spawn', () => {
+        if (!settled) {
+          settled = true;
+          resolve(false);
+        }
+      });
+    });
+    if (!failed) break;
+    child = null;
+  }
+
+  if (!child) {
     authStatus = '실패';
-    console.log(`[FAIL] Python 실행 실패: ${result?.error?.message ?? 'unknown'}`);
+    console.log(`[FAIL] Python 실행 실패: ${spawnError?.message ?? 'python3/python을 찾을 수 없습니다.'}`);
     return;
   }
-  if (result.stderr?.trim()) console.error(result.stderr.trim());
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.setEncoding('utf8');
+  child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    stdout += chunk;
+    const lines = chunk.split(/\r?\n/).filter(Boolean);
+    for (const line of lines) console.log(`[PY] ${line}`);
+  });
+  child.stderr?.on('data', (chunk: string) => {
+    stderr += chunk;
+    const lines = chunk.split(/\r?\n/).filter(Boolean);
+    for (const line of lines) console.error(`[PY] ${line}`);
+  });
+
+  const timeout = setTimeout(() => {
+    console.error('[TIMEOUT] OAuth 인증이 240초를 초과했습니다. 인증 프로세스를 종료합니다.');
+    child?.kill('SIGTERM');
+  }, 240_000);
+
+  const exitCode = await new Promise<number | null>(resolve => {
+    child?.once('close', code => resolve(code));
+    child?.once('error', error => {
+      console.error(`[FAIL] 인증 프로세스 오류: ${error.message}`);
+      resolve(1);
+    });
+  });
+  clearTimeout(timeout);
+
   try {
-    const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
     const payload = JSON.parse(lines.at(-1) ?? '');
-    if (result.status !== 0 || !payload.ok || !payload.authenticated) {
+    if (exitCode !== 0 || !payload.ok || !payload.authenticated) {
       authStatus = '실패';
-      console.log(`[FAIL] Kakao 인증 실패: ${payload?.error ?? `exit=${result.status}`}`);
+      console.log(`[FAIL] Kakao 인증 실패: ${payload?.error ?? `exit=${exitCode}`}`);
       return;
     }
     activeAccount = account;
@@ -171,11 +236,13 @@ async function login(): Promise<void> {
     loggedIn = true;
     authStatus = '성공';
     sessionId = String(payload.session_id ?? '');
+    showPanel();
     console.log(`[OK] Kakao OAuth 로그인 성공: ${payload.nickname ?? account.email}`);
     console.log(`[OK] session=${sessionId}`);
   } catch (error) {
     authStatus = '응답 오류';
     console.log(`[FAIL] 인증 응답 파싱 실패: ${error instanceof Error ? error.message : error}`);
+    if (stderr.trim()) console.error(`[DEBUG] ${stderr.trim()}`);
   }
 }
 
