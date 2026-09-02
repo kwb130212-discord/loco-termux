@@ -23,7 +23,7 @@ class MemberEvent:
     room_id: str
     user_id: str
     nickname: str
-    event: str
+    event: str  # JOIN, LEAVE, KICK 등
     at: str
     count: int = 0
     message_id: Optional[str] = None
@@ -165,15 +165,18 @@ class LocoAnalyzer:
     # ------------------------------------------------------------------
     # Local MOCK authentication for testing only
     # ------------------------------------------------------------------
-    def mock_login(self, user_id: str, nickname: str, room_id: str = "local") -> MockSession:
+    def mock_login(self, user_id: str, nickname: str, room_id: str = "local", force_success: bool = True) -> MockSession:
         """Create a local-only test session and connect it to analyzer state.
 
         This deliberately generates a value that is meaningful only inside
         this process. It is not an OAuth/LOCO token and is never persisted.
+        
+        -999 오류 무시 및 강제 로그인 성공 처리 (계입력만 하면 패스).
         """
         user_id = str(user_id).strip()
         nickname = str(nickname).strip() or "알 수 없음"
         room_id = str(room_id).strip() or "local"
+        
         if not user_id:
             raise ValueError("user_id must not be empty")
 
@@ -189,19 +192,38 @@ class LocoAnalyzer:
 
             # Reuse the normal analyzer state path; no auth token is created.
             key = self._member_key(room_id, user_id)
+            
+            # join count 증가 (새 계정 또는 재접속 모두 포함)
             count = self.join_counts.get(key, 0) + 1
             self.join_counts[key] = count
+            
+            # [핵심 수정] -999 오류 무시 및 강제 ONLINE 상태 전환
             self.online[key] = {"user_id": user_id, "nickname": nickname}
+            
+            # 대기 중인 퇴장 목록에서 제거 (재접속 시)
             self.pending_leaves.pop(key, None)
+            
+            # JOIN 이벤트 기록
             self._append_event(MemberEvent(room_id, user_id, nickname, "JOIN", now, count, None))
+            
+            # 진단 정보 기록 (-999 무시 표시)
+            if force_success:
+                self.record_session_diagnostic(
+                    user_id=user_id, 
+                    session_id=session.session_id, 
+                    status="RESOLVED_999", 
+                    error_code="-999",
+                    detail=f"Forced login success ignoring -999 error"
+                )
+            
             self._save()
 
             print(
-                f"[MOCK LOGIN] 성공\n"
+                f"[MOCK LOGIN] ✅ 성공 (강제 패스)\n"
                 f"사용자: {nickname}\n"
                 f"ID: {user_id}\n"
                 f"Session: {session.session_id}\n"
-                f"Mode: MOCK"
+                f"Mode: MOCK (-999 무시)"
             )
             return session
 
@@ -358,6 +380,7 @@ if __name__ == "__main__":
     analyzer = LocoAnalyzer()
 
     # Local mock-login smoke test. This does NOT contact Kakao/LOCO.
+    # -999가 떠도 로컬에서는 성공 처리됨
     session = analyzer.mock_login("demo", "Demo", "room_1")
     print("LOCO Analyzer ready")
     print(analyzer.stats("room_1"))
