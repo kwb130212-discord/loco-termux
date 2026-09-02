@@ -5,269 +5,157 @@ import crypto from 'node:crypto';
 import { loadConfig, saveConfig, type Account } from './config';
 
 const config = loadConfig();
-let activeAccount: Account | null = null;
+let activeAccount: Account | null = config.accounts.find(a => a.email === config.activeAccount) ?? config.accounts[0] ?? null;
 let loggedIn = false;
 let authStatus = '미인증';
 let sessionId = '';
+let lastAuthError = '';
+let busy = false;
 
 async function ask(prompt: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
-  try { return (await rl.question(prompt)).trim(); }
-  finally { rl.close(); }
+  try { return (await rl.question(prompt)).trim(); } finally { rl.close(); }
 }
 
 function runCommand(command: string, args: string[], timeout = 300_000) {
-  return spawnSync(command, args, {
-    encoding: 'utf8',
-    timeout,
-    maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-  });
+  return spawnSync(command, args, { encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
 }
 
-function runPython(args: string[]) {
+function runPythonSync(args: string[], timeout = 60_000) {
   const candidates = [process.env.PYTHON_BIN, 'python3', 'python'].filter(Boolean) as string[];
   let last: ReturnType<typeof spawnSync> | null = null;
-  for (const command of candidates) {
-    const result = runCommand(command, args, 210_000);
-    last = result;
-    if (!result.error) return result;
-  }
+  for (const command of candidates) { const result = runCommand(command, args, timeout); last = result; if (!result.error) return result; }
   return last;
 }
 
-function updateTermux(): void {
-  console.clear();
-  console.log('================================');
-  console.log('       LOCO-TERMUX UPDATE        ');
-  console.log('================================');
-  console.log('[UPDATE] GitHub main 최신 버전 확인 중...');
-
-  const pull = runCommand('git', ['pull', '--ff-only', 'origin', 'main'], 120_000);
-  if (pull.stdout?.trim()) console.log(pull.stdout.trim());
-  if (pull.stderr?.trim()) console.error(pull.stderr.trim());
-  if (pull.error || pull.status !== 0) {
-    console.log(`[FAIL] GitHub 업데이트 실패: ${pull.error?.message ?? `exit=${pull.status}`}`);
-    console.log('[TIP] 로컬 수정사항이 있으면 먼저 커밋/되돌린 뒤 다시 시도하세요.');
-    return;
-  }
-
-  console.log('[UPDATE] 의존성 최신 상태로 동기화 중...');
-  const install = runCommand('npm', ['install'], 300_000);
-  if (install.stdout?.trim()) console.log(install.stdout.trim());
-  if (install.stderr?.trim()) console.error(install.stderr.trim());
-  if (install.error || install.status !== 0) {
-    console.log(`[FAIL] npm install 실패: ${install.error?.message ?? `exit=${install.status}`}`);
-    return;
-  }
-
-  console.log('[UPDATE] 최신 소스 빌드 중...');
-  const build = runCommand('npm', ['run', 'build'], 300_000);
-  if (build.stdout?.trim()) console.log(build.stdout.trim());
-  if (build.stderr?.trim()) console.error(build.stderr.trim());
-  if (build.error || build.status !== 0) {
-    console.log(`[FAIL] 빌드 실패: ${build.error?.message ?? `exit=${build.status}`}`);
-    return;
-  }
-
-  console.log('[OK] 최신 버전 업데이트 완료. 프로그램을 재시작합니다.');
-  const child = spawn(process.execPath, ['dist/bridge-main.js'], { stdio: 'inherit' });
-  child.on('error', error => {
-    console.error(`[FAIL] 재시작 실패: ${error.message}`);
-    process.exitCode = 1;
-  });
-  process.exit(0);
-}
-
-function showPanel(): void {
-  console.clear();
-  console.log('================================');
-  console.log('        LOCO-TERMUX TEST         ');
-  console.log('================================');
-  console.log(`계정 : ${activeAccount?.email ?? config.activeAccount ?? '없음'}`);
-  console.log(`인증 : ${loggedIn ? '성공' : authStatus}`);
-  console.log(`세션 : ${sessionId || '없음'}`);
-  console.log('--------------------------------');
-  console.log('1. 계정 등록/선택');
-  console.log('2. Kakao OAuth 로그인');
-  console.log('3. OAuth 설정');
-  console.log('4. 현재 상태');
-  console.log('5. GitHub 최신버전 업데이트');
-  console.log('6. 종료');
-  console.log('================================');
-}
-
-async function registerAccount(): Promise<void> {
-  const email = await ask('카카오 계정 식별자(로그인 힌트용, 선택): ');
-  if (!email) return;
-  const index = config.accounts.findIndex(a => a.email === email);
-  const account: Account = index >= 0 ? config.accounts[index] : { email, deviceUuid: crypto.randomUUID() };
-  if (index >= 0) config.accounts[index] = account;
-  else config.accounts.push(account);
-  config.activeAccount = email;
-  activeAccount = account;
-  saveConfig(config);
-  console.log('[OK] 계정 저장');
-}
-
-async function selectAccount(): Promise<Account | null> {
-  if (!config.accounts.length) { await registerAccount(); return activeAccount; }
-  console.log('\n등록 계정');
-  config.accounts.forEach((account, i) => console.log(`${i + 1}. ${account.email}`));
-  const raw = await ask('번호(엔터=현재): ');
-  if (!raw) return config.accounts.find(a => a.email === config.activeAccount) ?? config.accounts[0];
-  const index = Number(raw) - 1;
-  if (!Number.isInteger(index) || index < 0 || index >= config.accounts.length) return null;
-  activeAccount = config.accounts[index];
-  config.activeAccount = activeAccount.email;
-  saveConfig(config);
-  return activeAccount;
-}
-
-async function configureOAuth(): Promise<void> {
-  console.log('\nOAuth 설정');
-  const clientId = await ask(`REST API Key [${config.kakao.clientId ? '설정됨' : '없음'}]: `);
-  const clientSecret = await ask(`Client Secret [${config.kakao.clientSecret ? '설정됨' : '없음'}]: `);
-  const redirectUri = await ask(`Redirect URI [${config.kakao.redirectUri}]: `);
-  if (clientId) config.kakao.clientId = clientId;
-  if (clientSecret) config.kakao.clientSecret = clientSecret;
-  if (redirectUri) config.kakao.redirectUri = redirectUri;
-  saveConfig(config);
-  console.log('[OK] OAuth 설정 저장');
+function restoreSession(): void {
+  if (!activeAccount || !config.kakao.clientId) return;
+  const result = runPythonSync(['분석기_cli.py', '--status', '--client-id', config.kakao.clientId, '--client-secret', config.kakao.clientSecret]);
+  if (!result || result.error) return;
+  try {
+    const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const payload = JSON.parse(lines.at(-1) ?? '');
+    if (payload.ok && payload.authenticated) {
+      loggedIn = true; authStatus = '성공'; sessionId = `oauth_${payload.user_id}`; lastAuthError = '';
+    } else if (payload.reason) { loggedIn = false; authStatus = '미인증'; sessionId = ''; }
+  } catch { /* best effort */ }
 }
 
 async function login(): Promise<void> {
   const account = activeAccount ?? config.accounts.find(a => a.email === config.activeAccount) ?? null;
   if (!account) { console.log('[!] 먼저 계정을 등록하세요.'); return; }
-  if (!config.kakao.clientId || !config.kakao.redirectUri) {
-    authStatus = 'OAuth 설정 필요';
-    console.log('[!] 먼저 OAuth 설정을 입력하세요.');
-    return;
-  }
+  if (!config.kakao.clientId || !config.kakao.redirectUri) { authStatus = 'OAuth 설정 필요'; console.log('[!] 먼저 OAuth 설정을 입력하세요.'); return; }
+  if (busy) { console.log('[!] 다른 작업이 진행 중입니다.'); return; }
 
-  authStatus = '인증중';
-  loggedIn = false;
-  sessionId = '';
-  showPanel();
-  console.log('\n[LOGIN] 실제 Kakao OAuth 인증 시작');
-  console.log('[LOGIN] 브라우저에서 Kakao 로그인을 완료하세요.');
-  console.log('[LOGIN] 인증이 끝나면 자동으로 이 화면으로 돌아옵니다.');
+  busy = true; loggedIn = false; sessionId = ''; lastAuthError = ''; authStatus = '인증중';
+  console.log('\n================================');
+  console.log('        KAKAO OAUTH AUTH');
+  console.log('================================');
+  console.log('[AUTH] 실제 Kakao OAuth 인증을 시작합니다.');
+  console.log('[AUTH] 브라우저에서 로그인을 완료하면 자동으로 복귀합니다.');
 
   const candidates = [process.env.PYTHON_BIN, 'python3', 'python'].filter(Boolean) as string[];
   let child: ReturnType<typeof spawn> | null = null;
-  let spawnError: Error | null = null;
-
+  let spawnError = '';
   for (const command of candidates) {
-    const attempt = spawn(command, [
-      '분석기_cli.py', '--oauth-login', '--client-id', config.kakao.clientId,
-      '--client-secret', config.kakao.clientSecret, '--redirect-uri', config.kakao.redirectUri,
-      '--login-hint', account.email,
-    ], {
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+    const attempt = spawn(command, ['분석기_cli.py', '--oauth-login', '--client-id', config.kakao.clientId, '--client-secret', config.kakao.clientSecret, '--redirect-uri', config.kakao.redirectUri, '--login-hint', account.email], {
+      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }, stdio: ['ignore', 'pipe', 'pipe'],
     });
-    child = attempt;
-    const failed = await new Promise<boolean>(resolve => {
-      let settled = false;
-      const onError = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        spawnError = error;
-        resolve(true);
-      };
-      attempt.once('error', onError);
-      attempt.once('spawn', () => {
-        if (!settled) {
-          settled = true;
-          resolve(false);
-        }
-      });
+    const ok = await new Promise<boolean>(resolve => {
+      let done = false;
+      attempt.once('spawn', () => { done = true; resolve(true); });
+      attempt.once('error', error => { if (!done) { spawnError = error.message; resolve(false); } });
     });
-    if (!failed) break;
-    child = null;
+    if (ok) { child = attempt; break; }
   }
+  if (!child) { busy = false; authStatus = '실패'; lastAuthError = spawnError || 'Python 실행 실패'; console.log(`[FAIL] ${lastAuthError}`); return; }
 
-  if (!child) {
-    authStatus = '실패';
-    console.log(`[FAIL] Python 실행 실패: ${spawnError?.message ?? 'python3/python을 찾을 수 없습니다.'}`);
-    return;
-  }
+  let stdout = ''; let stderr = '';
+  child.stdout?.setEncoding('utf8'); child.stderr?.setEncoding('utf8');
+  child.stdout?.on('data', chunk => { const text = String(chunk); stdout += text; for (const line of text.split(/\r?\n/).filter(Boolean)) console.log(`[PY] ${line}`); });
+  child.stderr?.on('data', chunk => { const text = String(chunk); stderr += text; for (const line of text.split(/\r?\n/).filter(Boolean)) console.error(`[AUTH] ${line}`); });
 
-  let stdout = '';
-  let stderr = '';
-  child.stdout?.setEncoding('utf8');
-  child.stderr?.setEncoding('utf8');
-  child.stdout?.on('data', (chunk: string) => {
-    stdout += chunk;
-    const lines = chunk.split(/\r?\n/).filter(Boolean);
-    for (const line of lines) console.log(`[PY] ${line}`);
-  });
-  child.stderr?.on('data', (chunk: string) => {
-    stderr += chunk;
-    const lines = chunk.split(/\r?\n/).filter(Boolean);
-    for (const line of lines) console.error(`[PY] ${line}`);
-  });
-
-  const timeout = setTimeout(() => {
-    console.error('[TIMEOUT] OAuth 인증이 240초를 초과했습니다. 인증 프로세스를 종료합니다.');
-    child?.kill('SIGTERM');
-  }, 240_000);
-
-  const exitCode = await new Promise<number | null>(resolve => {
-    child?.once('close', code => resolve(code));
-    child?.once('error', error => {
-      console.error(`[FAIL] 인증 프로세스 오류: ${error.message}`);
-      resolve(1);
-    });
-  });
-  clearTimeout(timeout);
+  const timer = setTimeout(() => { console.error('[TIMEOUT] OAuth 인증이 240초를 초과했습니다.'); child?.kill('SIGTERM'); }, 240_000);
+  const exitCode = await new Promise<number | null>(resolve => { child!.once('close', code => resolve(code)); child!.once('error', error => { lastAuthError = error.message; resolve(1); }); });
+  clearTimeout(timer); busy = false;
 
   try {
     const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
     const payload = JSON.parse(lines.at(-1) ?? '');
-    if (exitCode !== 0 || !payload.ok || !payload.authenticated) {
-      authStatus = '실패';
-      console.log(`[FAIL] Kakao 인증 실패: ${payload?.error ?? `exit=${exitCode}`}`);
-      return;
-    }
-    activeAccount = account;
-    config.activeAccount = account.email;
-    saveConfig(config);
-    loggedIn = true;
-    authStatus = '성공';
-    sessionId = String(payload.session_id ?? '');
-    showPanel();
-    console.log(`[OK] Kakao OAuth 로그인 성공: ${payload.nickname ?? account.email}`);
-    console.log(`[OK] session=${sessionId}`);
-  } catch (error) {
-    authStatus = '응답 오류';
-    console.log(`[FAIL] 인증 응답 파싱 실패: ${error instanceof Error ? error.message : error}`);
-    if (stderr.trim()) console.error(`[DEBUG] ${stderr.trim()}`);
-  }
+    if (exitCode !== 0 || !payload.ok || !payload.authenticated) { authStatus = '실패'; lastAuthError = String(payload?.error ?? `exit=${exitCode}`); console.log(`[FAIL] Kakao 인증 실패: ${lastAuthError}`); return; }
+    activeAccount = account; config.activeAccount = account.email; saveConfig(config); loggedIn = true; authStatus = '성공'; lastAuthError = ''; sessionId = String(payload.session_id ?? '');
+    showPanel(); console.log(`[OK] Kakao OAuth 로그인 성공: ${payload.nickname ?? account.email}`); console.log(`[OK] session=${sessionId || 'persistent'}`);
+  } catch (error) { authStatus = '응답 오류'; lastAuthError = error instanceof Error ? error.message : String(error); console.log(`[FAIL] 인증 응답 파싱 실패: ${lastAuthError}`); if (stderr.trim()) console.error(`[DEBUG] ${stderr.trim()}`); }
+}
+
+async function logout(): Promise<void> {
+  if (busy) { console.log('[!] 인증 작업이 진행 중입니다.'); return; }
+  const result = runPythonSync(['분석기_cli.py', '--logout']);
+  loggedIn = false; authStatus = '미인증'; sessionId = ''; lastAuthError = '';
+  console.log(result?.status === 0 ? '[OK] Kakao 로그아웃 및 로컬 세션 삭제 완료' : '[WARN] 로컬 인증 상태를 초기화했습니다.');
+}
+
+function updateTermux(): void {
+  console.clear(); console.log('================================'); console.log('       LOCO-TERMUX UPDATE        '); console.log('================================');
+  const before = runCommand('git', ['rev-parse', '--short', 'HEAD'], 20_000).stdout?.trim();
+  console.log('[UPDATE] GitHub main 최신 버전 확인 중...');
+  const pull = runCommand('git', ['pull', '--ff-only', 'origin', 'main'], 120_000);
+  if (pull.stdout?.trim()) console.log(pull.stdout.trim()); if (pull.stderr?.trim()) console.error(pull.stderr.trim());
+  if (pull.error || pull.status !== 0) { console.log(`[FAIL] GitHub 업데이트 실패: ${pull.error?.message ?? `exit=${pull.status}`}`); return; }
+  console.log('[UPDATE] npm 의존성 동기화 중...');
+  const install = runCommand('npm', ['install'], 300_000);
+  if (install.stdout?.trim()) console.log(install.stdout.trim()); if (install.stderr?.trim()) console.error(install.stderr.trim());
+  if (install.error || install.status !== 0) { console.log(`[FAIL] npm install 실패: ${install.error?.message ?? `exit=${install.status}`}`); return; }
+  console.log('[UPDATE] TypeScript 빌드 중...');
+  const build = runCommand('npm', ['run', 'build'], 300_000);
+  if (build.stdout?.trim()) console.log(build.stdout.trim()); if (build.stderr?.trim()) console.error(build.stderr.trim());
+  if (build.error || build.status !== 0) { console.log(`[FAIL] 빌드 실패: ${build.error?.message ?? `exit=${build.status}`}`); return; }
+  const after = runCommand('git', ['rev-parse', '--short', 'HEAD'], 20_000).stdout?.trim();
+  console.log(`[OK] 업데이트 완료: ${before || '?'} -> ${after || '?'}`); console.log('[OK] 재시작합니다.');
+  const child = spawn(process.execPath, ['dist/bridge-main.js'], { stdio: 'inherit' }); child.on('error', error => console.error(`[FAIL] 재시작 실패: ${error.message}`)); process.exit(0);
+}
+
+function showPanel(): void {
+  console.clear();
+  console.log('========================================'); console.log('          LOCO-TERMUX ULTRA             '); console.log('========================================');
+  console.log(`계정 : ${activeAccount?.email ?? config.activeAccount ?? '없음'}`);
+  console.log(`인증 : ${loggedIn ? '성공' : authStatus}`);
+  console.log(`세션 : ${sessionId || (loggedIn ? 'persistent' : '없음')}`);
+  if (lastAuthError) console.log(`오류 : ${lastAuthError.slice(0, 160)}`);
+  console.log('----------------------------------------');
+  console.log('1. 계정 등록/선택'); console.log('2. Kakao OAuth 로그인'); console.log('3. OAuth 설정'); console.log('4. 현재 상태/세션 재검증'); console.log('5. GitHub 최신버전 업데이트'); console.log('6. Kakao 로그아웃'); console.log('7. 종료');
+  console.log('========================================');
+}
+
+async function registerAccount(): Promise<void> {
+  const email = await ask('카카오 계정 식별자(로그인 힌트용, 선택): '); if (!email) return;
+  const index = config.accounts.findIndex(a => a.email === email); const account: Account = index >= 0 ? config.accounts[index] : { email, deviceUuid: crypto.randomUUID() };
+  if (index >= 0) config.accounts[index] = account; else config.accounts.push(account);
+  config.activeAccount = email; activeAccount = account; saveConfig(config); console.log('[OK] 계정 저장');
+}
+
+async function selectAccount(): Promise<void> {
+  if (!config.accounts.length) { await registerAccount(); return; }
+  console.log('\n등록 계정'); config.accounts.forEach((a, i) => console.log(`${i + 1}. ${a.email}`));
+  const raw = await ask('번호(엔터=현재): '); const current = config.accounts.findIndex(a => a.email === config.activeAccount); const index = raw ? Number(raw) - 1 : (current >= 0 ? current : 0);
+  if (!Number.isInteger(index) || index < 0 || index >= config.accounts.length) return;
+  activeAccount = config.accounts[index]; config.activeAccount = activeAccount.email; saveConfig(config); loggedIn = false; sessionId = ''; authStatus = '미인증'; restoreSession();
+}
+
+async function configureOAuth(): Promise<void> {
+  console.log('\nOAuth 설정');
+  const clientId = await ask(`REST API Key [${config.kakao.clientId ? '설정됨' : '없음'}]: `); const clientSecret = await ask(`Client Secret [${config.kakao.clientSecret ? '설정됨' : '없음'}]: `); const redirectUri = await ask(`Redirect URI [${config.kakao.redirectUri}]: `);
+  if (clientId) config.kakao.clientId = clientId; if (clientSecret) config.kakao.clientSecret = clientSecret; if (redirectUri) config.kakao.redirectUri = redirectUri; saveConfig(config); console.log('[OK] OAuth 설정 저장');
 }
 
 async function main(): Promise<void> {
+  restoreSession();
   while (true) {
-    showPanel();
-    const choice = await ask('> ');
-    if (choice === '1') await selectAccount();
-    else if (choice === '2') await login();
-    else if (choice === '3') await configureOAuth();
-    else if (choice === '4') {
-      console.log(`\n상태=${authStatus}`);
-      console.log(`로그인=${loggedIn}`);
-      console.log(`세션=${sessionId || '없음'}`);
-      await ask('엔터 > ');
-    } else if (choice === '5') {
-      updateTermux();
-    } else if (choice === '6' || choice === 'exit') {
-      saveConfig(config);
-      return;
-    }
+    showPanel(); const choice = await ask('> ');
+    if (choice === '1') await selectAccount(); else if (choice === '2') await login(); else if (choice === '3') await configureOAuth();
+    else if (choice === '4') { restoreSession(); console.log(`\n상태=${authStatus}\n로그인=${loggedIn}\n세션=${sessionId || '없음'}`); if (lastAuthError) console.log(`오류=${lastAuthError}`); await ask('엔터 > '); }
+    else if (choice === '5') updateTermux(); else if (choice === '6') await logout(); else if (choice === '7' || choice === 'exit') { saveConfig(config); return; }
   }
 }
 
-main().catch(error => {
-  console.error('[FATAL]', error);
-  process.exitCode = 1;
-});
+main().catch(error => { console.error('[FATAL]', error); process.exitCode = 1; });
