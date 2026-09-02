@@ -21,6 +21,9 @@ import webbrowser
 AUTH_URL = "https://kauth.kakao.com/oauth/authorize"
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 ME_URL = "https://kapi.kakao.com/v2/user/me"
+LOGOUT_URL = "https://kapi.kakao.com/v1/user/logout"
+DEFAULT_REDIRECT_URI = "http://127.0.0.1:8765/callback"
+DEFAULT_SESSION_FILE = "~/.loco-termux/kakao-session.json"
 
 
 @dataclass
@@ -58,14 +61,15 @@ def _post_form(url: str, data: dict[str, str], timeout: int = 20) -> dict:
     request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise KakaoOAuthError(f"Kakao token endpoint HTTP {exc.code}: {detail}") from exc
+        raise KakaoOAuthError(f"Kakao endpoint HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise KakaoOAuthError(f"Kakao token endpoint connection failed: {exc}") from exc
+        raise KakaoOAuthError(f"Kakao endpoint connection failed: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise KakaoOAuthError("Kakao token endpoint returned invalid JSON") from exc
+        raise KakaoOAuthError("Kakao endpoint returned invalid JSON") from exc
 
 
 def _get_json(url: str, access_token: str, timeout: int = 20) -> dict:
@@ -78,6 +82,8 @@ def _get_json(url: str, access_token: str, timeout: int = 20) -> dict:
         raise KakaoOAuthError(f"Kakao user API HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise KakaoOAuthError(f"Kakao user API connection failed: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise KakaoOAuthError("Kakao user API returned invalid JSON") from exc
 
 
 def build_authorize_url(client_id: str, redirect_uri: str, state: str, login_hint: str = "") -> str:
@@ -145,6 +151,23 @@ def login_from_code(client_id: str, client_secret: str, redirect_uri: str, code:
     )
 
 
+def logout_session(session: OAuthSession) -> None:
+    """Log out the current Kakao access token without unlinking the account."""
+    request = urllib.request.Request(
+        LOGOUT_URL,
+        headers={"Authorization": f"Bearer {session.access_token}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise KakaoOAuthError(f"Kakao logout HTTP {exc.code}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise KakaoOAuthError(f"Kakao logout connection failed: {exc}") from exc
+
+
 def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180) -> str:
     parsed = urlparse(redirect_uri)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
@@ -208,15 +231,28 @@ def login_interactive(client_id: str, client_secret: str, redirect_uri: str, log
     return login_from_code(client_id, client_secret, redirect_uri, code)
 
 
-def save_session(session: OAuthSession, path: str) -> None:
+def save_session(session: OAuthSession, path: str = DEFAULT_SESSION_FILE) -> None:
     target = Path(path).expanduser(); target.parent.mkdir(parents=True, exist_ok=True)
+    try: target.parent.chmod(0o700)
+    except OSError: pass
     target.write_text(json.dumps(asdict(session), ensure_ascii=False, indent=2), encoding="utf-8")
     try: target.chmod(0o600)
     except OSError: pass
 
 
-def load_session(path: str) -> Optional[OAuthSession]:
+def delete_session(path: str = DEFAULT_SESSION_FILE) -> None:
+    target = Path(path).expanduser()
+    try:
+        target.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise KakaoOAuthError(f"Could not delete local session file: {exc}") from exc
+
+
+def load_session(path: str = DEFAULT_SESSION_FILE) -> Optional[OAuthSession]:
     target = Path(path).expanduser()
     if not target.exists(): return None
-    try: return OAuthSession(**json.loads(target.read_text(encoding="utf-8")))
+    try:
+        return OAuthSession(**json.loads(target.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError, KeyError): return None
