@@ -4,6 +4,9 @@ from __future__ import annotations
 
 Uses Kakao's documented OAuth authorization-code flow. It never accepts or
 submits a Kakao account password, fabricates a session, or ignores failures.
+
+QR mode displays the official OAuth authorization URL as a QR code. This is
+an OAuth QR convenience flow, not a private KakaoTalk client/protocol login.
 """
 
 from dataclasses import dataclass, asdict
@@ -13,6 +16,7 @@ from typing import Callable, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 import json
 import secrets
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -183,6 +187,26 @@ def _open_browser(url: str) -> bool:
         return False
 
 
+def _show_qr(url: str) -> bool:
+    """Render an OAuth URL as a terminal QR code when qrencode is installed."""
+    qrencode = shutil.which("qrencode")
+    if not qrencode:
+        return False
+    try:
+        result = subprocess.run(
+            [qrencode, "-t", "ANSIUTF8", "-m", "1", url],
+            check=False, text=True, capture_output=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print("\n[AUTH] 아래 QR을 다른 기기에서 스캔하세요.\n")
+            print(result.stdout.rstrip())
+            print("\n[AUTH] 스캔 후 Kakao 로그인을 완료하면 이 Termux 세션이 자동으로 이어집니다.")
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
 def _manual_callback(expected_state: str) -> str:
     print("[AUTH] 자동 복귀가 되지 않았습니다.")
     print("[AUTH] 브라우저 주소창의 callback URL 전체를 복사해서 아래에 붙여넣으세요.")
@@ -246,6 +270,32 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 120
     if result.get("code"):
         return result["code"]
     raise KakaoOAuthError("Timed out waiting for Kakao OAuth callback")
+
+
+def login_qr_interactive(client_id: str, client_secret: str, redirect_uri: str, login_hint: str = "") -> OAuthSession:
+    """QR convenience login using the documented Kakao OAuth authorization URL."""
+    state = secrets.token_urlsafe(32)
+    url = build_authorize_url(client_id, redirect_uri, state, login_hint)
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
+        def show_qr() -> None:
+            if not _show_qr(url):
+                print("[AUTH] qrencode가 없어 URL 방식으로 표시합니다.")
+            print("[AUTH] Login URL:")
+            print(url)
+
+        try:
+            return login_from_code(client_id, client_secret, redirect_uri, wait_for_callback(redirect_uri, state, on_ready=show_qr))
+        except KakaoOAuthError as exc:
+            if not str(exc).startswith("Timed out waiting for Kakao OAuth callback"):
+                raise
+            return login_from_code(client_id, client_secret, redirect_uri, _manual_callback(state))
+
+    if not _show_qr(url):
+        print("[AUTH] qrencode가 없습니다. 아래 URL을 브라우저에서 열어 로그인하세요.")
+    print("[AUTH] Login URL:")
+    print(url)
+    return login_from_code(client_id, client_secret, redirect_uri, _manual_callback(state))
 
 
 def login_interactive(client_id: str, client_secret: str, redirect_uri: str, login_hint: str = "") -> OAuthSession:
