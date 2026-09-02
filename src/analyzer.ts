@@ -6,6 +6,7 @@ import { saveConfig, type Config } from './config';
 export type AnalyzerEventType = 'JOIN' | 'LEAVE' | 'READ' | 'KICK';
 export type MemberEvent = { roomId: string; userId: string; nickname: string; event: AnalyzerEventType; at: string; count: number; messageId?: string };
 export type PendingLeave = { roomId: string; userId: string; nickname: string; leftAt: string; messageId?: string };
+export type LeaveCompat = PendingLeave & { userKey: string; userName: string };
 export type SessionDiagnostic = { userId: string; sessionId?: string; observedAt: string; status: string; errorCode?: string; detail?: string };
 export type MockSession = { userId: string; nickname: string; sessionId: string; createdAt: string; mode: 'MOCK'; authenticated: true };
 export type KickResult = { ok: boolean; reason?: 'ADMIN_ONLY' | 'TARGET_NOT_FOUND'; action?: 'KICK_REQUEST'; roomId?: string; targetUserId?: string; targetNickname?: string };
@@ -51,19 +52,12 @@ export class RoomAnalyzer {
     const nickname = user?.nickname ?? user?.userInfo?.nickname ?? user?.UserInfo?.Nickname ?? '알 수 없음';
     return { userId: String(userId ?? nickname), nickname: String(nickname || '알 수 없음') };
   }
+  private compat(record: PendingLeave): LeaveCompat { return { ...record, userKey: record.userId, userName: record.nickname }; }
 
   private save(): void {
     const reads: Record<string, Record<string, string>> = {};
     for (const [messageId, bucket] of this.reads) reads[messageId] = Object.fromEntries(bucket);
-    const payload: AnalyzerState = {
-      version: 2,
-      events: this.events.slice(-this.maxEvents),
-      pendingLeaves: Object.fromEntries(this.pendingLeaves),
-      reads: Object.fromEntries(Object.entries(reads).slice(-this.maxReads)),
-      joinCounts: Object.fromEntries(this.joinCounts),
-      online: Object.fromEntries(this.online),
-      sessionDiagnostics: this.diagnostics.slice(-this.maxDiagnostics),
-    };
+    const payload: AnalyzerState = { version: 2, events: this.events.slice(-this.maxEvents), pendingLeaves: Object.fromEntries(this.pendingLeaves), reads: Object.fromEntries(Object.entries(reads).slice(-this.maxReads)), joinCounts: Object.fromEntries(this.joinCounts), online: Object.fromEntries(this.online), sessionDiagnostics: this.diagnostics.slice(-this.maxDiagnostics) };
     const tmp = `${this.dataFile}.${process.pid}.tmp`;
     try { fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 }); fs.renameSync(tmp, this.dataFile); }
     catch (error) { try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ } console.error('[Analyzer] save failed:', error instanceof Error ? error.message : error); }
@@ -74,21 +68,16 @@ export class RoomAnalyzer {
     try {
       const raw = JSON.parse(fs.readFileSync(this.dataFile, 'utf8')) as Partial<AnalyzerState>;
       if (Array.isArray(raw.events)) for (const x of raw.events as any[]) {
-        const event = x.event;
-        if (!this.VALID_EVENTS.has(event)) continue;
-        this.events.push({ roomId: String(x.roomId ?? x.room_id ?? ''), userId: String(x.userId ?? x.user_id ?? ''), nickname: String(x.nickname ?? '알 수 없음'), event, at: String(x.at ?? this.now()), count: Number.isFinite(Number(x.count)) ? Math.max(0, Math.floor(Number(x.count))) : 0, ...(x.messageId != null || x.message_id != null ? { messageId: String(x.messageId ?? x.message_id) } : {}) });
+        if (!this.VALID_EVENTS.has(x.event)) continue;
+        this.events.push({ roomId: String(x.roomId ?? x.room_id ?? ''), userId: String(x.userId ?? x.user_id ?? ''), nickname: String(x.nickname ?? '알 수 없음'), event: x.event, at: String(x.at ?? this.now()), count: Number.isFinite(Number(x.count)) ? Math.max(0, Math.floor(Number(x.count))) : 0, ...(x.messageId != null || x.message_id != null ? { messageId: String(x.messageId ?? x.message_id) } : {}) });
       }
       if (raw.pendingLeaves && typeof raw.pendingLeaves === 'object') for (const [key, value] of Object.entries(raw.pendingLeaves)) {
         const x: any = value; if (!x) continue;
-        this.pendingLeaves.set(key, { roomId: String(x.roomId ?? x.room_id ?? ''), userId: String(x.userId ?? x.user_id ?? ''), nickname: String(x.nickname ?? '알 수 없음'), leftAt: String(x.leftAt ?? x.left_at ?? this.now()), ...(x.messageId != null || x.message_id != null ? { messageId: String(x.messageId ?? x.message_id) } : {}) });
+        this.pendingLeaves.set(key, { roomId: String(x.roomId ?? x.room_id ?? ''), userId: String(x.userId ?? x.user_id ?? x.userKey ?? ''), nickname: String(x.nickname ?? x.userName ?? '알 수 없음'), leftAt: String(x.leftAt ?? x.left_at ?? x.at ?? this.now()), ...(x.messageId != null || x.message_id != null ? { messageId: String(x.messageId ?? x.message_id) } : {}) });
       }
-      if (raw.reads && typeof raw.reads === 'object') for (const [messageId, value] of Object.entries(raw.reads)) {
-        if (value && typeof value === 'object') this.reads.set(String(messageId), new Map(Object.entries(value).map(([id, name]) => [String(id), String(name)])));
-      }
+      if (raw.reads && typeof raw.reads === 'object') for (const [messageId, value] of Object.entries(raw.reads)) if (value && typeof value === 'object') this.reads.set(String(messageId), new Map(Object.entries(value).map(([id, name]) => [String(id), String(name)])));
       if (raw.joinCounts && typeof raw.joinCounts === 'object') for (const [key, value] of Object.entries(raw.joinCounts)) this.joinCounts.set(String(key), Number(value) || 0);
-      if (raw.online && typeof raw.online === 'object') for (const [key, value] of Object.entries(raw.online)) {
-        const x: any = value; if (x && typeof x === 'object') this.online.set(key, { userId: String(x.userId ?? x.user_id ?? ''), nickname: String(x.nickname ?? '알 수 없음') });
-      }
+      if (raw.online && typeof raw.online === 'object') for (const [key, value] of Object.entries(raw.online)) { const x: any = value; if (x && typeof x === 'object') this.online.set(key, { userId: String(x.userId ?? x.user_id ?? ''), nickname: String(x.nickname ?? '알 수 없음') }); }
       if (Array.isArray(raw.sessionDiagnostics)) for (const x of raw.sessionDiagnostics as any[]) this.diagnostics.push({ userId: String(x.userId ?? x.user_id ?? ''), ...(x.sessionId != null || x.session_id != null ? { sessionId: String(x.sessionId ?? x.session_id) } : {}), observedAt: String(x.observedAt ?? x.observed_at ?? this.now()), status: String(x.status ?? 'UNKNOWN'), ...(x.errorCode != null || x.error_code != null ? { errorCode: String(x.errorCode ?? x.error_code) } : {}), ...(x.detail != null ? { detail: String(x.detail) } : {}) });
       this.events.splice(0, Math.max(0, this.events.length - this.maxEvents));
       while (this.reads.size > this.maxReads) this.reads.delete(this.reads.keys().next().value as string);
@@ -114,8 +103,7 @@ export class RoomAnalyzer {
 
   mockLogout(sessionId: string): boolean {
     const session = this.mockSessions.get(String(sessionId)); if (!session) return false;
-    this.mockSessions.delete(String(sessionId));
-    for (const [key, member] of this.online) if (member.userId === session.userId) this.online.delete(key);
+    this.mockSessions.delete(String(sessionId)); for (const [key, member] of this.online) if (member.userId === session.userId) this.online.delete(key);
     this.save(); return true;
   }
   mockSessionsList(): MockSession[] { return [...this.mockSessions.values()]; }
@@ -133,48 +121,23 @@ export class RoomAnalyzer {
     this.appendEvent({ roomId: room, userId, nickname, event: 'LEAVE', at: leftAt, count: 0, ...(messageId ? { messageId: String(messageId) } : {}) }); this.save(); return record;
   }
 
-  setLeaveMessageId(roomId: string, userId: string, messageId: string): boolean {
-    const record = this.pendingLeaves.get(this.memberKey(String(roomId), String(userId))); if (!record) return false;
-    record.messageId = String(messageId); this.save(); return true;
-  }
+  setLeaveMessageId(roomId: string, userId: string, messageId: string): boolean { const record = this.pendingLeaves.get(this.memberKey(String(roomId), String(userId))); if (!record) return false; record.messageId = String(messageId); this.save(); return true; }
+  recordRead(messageId: string, user: any): void { const { userId, nickname } = this.safeUser(user), id = String(messageId), bucket = this.reads.get(id) ?? new Map<string, string>(); bucket.set(userId, nickname); this.reads.set(id, bucket); while (this.reads.size > this.maxReads) this.reads.delete(this.reads.keys().next().value as string); this.save(); }
+  recordSessionDiagnostic(userId: string, sessionId: string | undefined, status: string, errorCode?: string, detail?: string): void { this.diagnostics.push({ userId: String(userId), ...(sessionId ? { sessionId: String(sessionId) } : {}), observedAt: this.now(), status: String(status), ...(errorCode ? { errorCode: String(errorCode) } : {}), ...(detail ? { detail: String(detail) } : {}) }); if (this.diagnostics.length > this.maxDiagnostics) this.diagnostics.splice(0, this.diagnostics.length - this.maxDiagnostics); this.save(); }
+  diagnose999(userId: string) { const matches = this.diagnostics.filter(x => x.userId === String(userId)), last = matches.at(-1); return { userId: String(userId), observations: matches.length, lastStatus: last?.status ?? null, lastErrorCode: last?.errorCode ?? null, lastSessionId: last?.sessionId ?? null, recommendation: 'Compare the real authentication response and session lifecycle. This analyzer cannot repair a server-side session or bypass authentication.' }; }
 
-  recordRead(messageId: string, user: any): void {
-    const { userId, nickname } = this.safeUser(user), id = String(messageId), bucket = this.reads.get(id) ?? new Map<string, string>();
-    bucket.set(userId, nickname); this.reads.set(id, bucket); while (this.reads.size > this.maxReads) this.reads.delete(this.reads.keys().next().value as string); this.save();
-  }
-
-  recordSessionDiagnostic(userId: string, sessionId: string | undefined, status: string, errorCode?: string, detail?: string): void {
-    this.diagnostics.push({ userId: String(userId), ...(sessionId ? { sessionId: String(sessionId) } : {}), observedAt: this.now(), status: String(status), ...(errorCode ? { errorCode: String(errorCode) } : {}), ...(detail ? { detail: String(detail) } : {}) });
-    if (this.diagnostics.length > this.maxDiagnostics) this.diagnostics.splice(0, this.diagnostics.length - this.maxDiagnostics); this.save();
-  }
-
-  diagnose999(userId: string) {
-    const matches = this.diagnostics.filter(x => x.userId === String(userId)), last = matches.at(-1);
-    return { userId: String(userId), observations: matches.length, lastStatus: last?.status ?? null, lastErrorCode: last?.errorCode ?? null, lastSessionId: last?.sessionId ?? null, recommendation: 'Compare the real authentication response and session lifecycle. This analyzer cannot repair a server-side session or bypass authentication.' };
-  }
-
-  getLeaveDetail(userId: string, roomId?: string): PendingLeave | undefined {
-    if (roomId != null) return this.pendingLeaves.get(this.memberKey(String(roomId), String(userId)));
-    for (const leave of [...this.pendingLeaves.values()].reverse()) if (leave.userId === String(userId)) return leave;
+  getLeaveDetail(userId: string, roomId?: string): LeaveCompat | undefined {
+    if (roomId != null) { const x = this.pendingLeaves.get(this.memberKey(String(roomId), String(userId))); return x ? this.compat(x) : undefined; }
+    for (const leave of [...this.pendingLeaves.values()].reverse()) if (leave.userId === String(userId)) return this.compat(leave);
     return undefined;
   }
-  findLeave(roomId: string, userId: string): PendingLeave | undefined { return this.pendingLeaves.get(this.memberKey(String(roomId), String(userId))); }
-  findLeaveByMessage(roomId: string, messageId: string): PendingLeave | undefined { for (const x of this.pendingLeaves.values()) if (x.roomId === String(roomId) && x.messageId === String(messageId)) return x; return undefined; }
+  findLeave(roomId: string, userId: string): LeaveCompat | undefined { const x = this.pendingLeaves.get(this.memberKey(String(roomId), String(userId))); return x ? this.compat(x) : undefined; }
+  findLeaveByMessage(roomId: string, messageId: string): LeaveCompat | undefined { for (const x of this.pendingLeaves.values()) if (x.roomId === String(roomId) && x.messageId === String(messageId)) return this.compat(x); return undefined; }
   isAdmin(userId: string): boolean { return this.config.admins.some(id => String(id) === String(userId)); }
-  validateKick(actorUserId: string, roomId: string, targetUserId: string): KickResult {
-    if (!this.isAdmin(actorUserId)) return { ok: false, reason: 'ADMIN_ONLY' };
-    const target = this.findLeave(roomId, targetUserId); if (!target) return { ok: false, reason: 'TARGET_NOT_FOUND' };
-    return { ok: true, action: 'KICK_REQUEST', roomId: target.roomId, targetUserId: target.userId, targetNickname: target.nickname };
-  }
-  logCommand(room: string, actorKey: string, actorName: string, command: string, result: string): void {
-    this.config.commandLogs.push({ at: this.now(), room: String(room), userKey: String(actorKey), userName: String(actorName), command: String(command), result: String(result) });
-    if (this.config.commandLogs.length > 5000) this.config.commandLogs.splice(0, this.config.commandLogs.length - 5000); saveConfig(this.config);
-  }
+  validateKick(actorUserId: string, roomId: string, targetUserId: string): KickResult { if (!this.isAdmin(actorUserId)) return { ok: false, reason: 'ADMIN_ONLY' }; const target = this.findLeave(roomId, targetUserId); if (!target) return { ok: false, reason: 'TARGET_NOT_FOUND' }; return { ok: true, action: 'KICK_REQUEST', roomId: target.roomId, targetUserId: target.userId, targetNickname: target.nickname }; }
+  logCommand(room: string, actorKey: string, actorName: string, command: string, result: string): void { this.config.commandLogs.push({ at: this.now(), room: String(room), userKey: String(actorKey), userName: String(actorName), command: String(command), result: String(result) }); if (this.config.commandLogs.length > 5000) this.config.commandLogs.splice(0, this.config.commandLogs.length - 5000); saveConfig(this.config); }
   getOnline(roomId: string): Array<{ userId: string; nickname: string }> { const prefix = `${String(roomId)}\x1f`; return [...this.online.entries()].filter(([key]) => key.startsWith(prefix)).map(([, value]) => ({ ...value })); }
   roomEvents(roomId: string, limit = 100): MemberEvent[] { return this.events.filter(x => x.roomId === String(roomId)).slice(-Math.max(0, Math.floor(limit))); }
   stats(roomId?: string) { const events = roomId == null ? this.events : this.events.filter(x => x.roomId === String(roomId)); return { events: events.length, joins: events.filter(x => x.event === 'JOIN').length, leaves: events.filter(x => x.event === 'LEAVE').length, reads: this.reads.size, online: roomId == null ? this.online.size : this.getOnline(roomId).length, diagnostics: this.diagnostics.length }; }
-  leaveText(record: PendingLeave): string {
-    let time = record.leftAt; try { time = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(record.leftAt)); } catch { /* keep */ }
-    return [`${record.nickname}님이 나가셨습니다.`, '', '[전체보기]', '', `${record.nickname} 님이 ${time}에 나가셨습니다.`, '나간 사람을 내보내실려면 이 메시지에 답장으로 kick이라고 보내주세요.', '[관리자만 가능합니다]'].join('\n');
-  }
+  leaveText(record: PendingLeave): string { let time = record.leftAt; try { time = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(record.leftAt)); } catch { /* keep */ } return [`${record.nickname}님이 나가셨습니다.`, '', '[전체보기]', '', `${record.nickname} 님이 ${time}에 나가셨습니다.`, '나간 사람을 내보내실려면 이 메시지에 답장으로 kick이라고 보내주세요.', '[관리자만 가능합니다]'].join('\n'); }
 }
