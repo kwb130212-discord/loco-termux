@@ -1,6 +1,6 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Termux Android Bridge bot using the repository's Python analyzer as the authentication/state layer",
   "main": "dist/bridge-main.js",
@@ -8,6 +8,14 @@
     "build": "tsc",
     "start": "node dist/bridge-main.js",
     "start:loco": "node dist/index.js",
+    "rooms": "python3 방관리_cli.py rooms",
+    "room:add": "python3 방관리_cli.py add",
+    "room:enable": "python3 방관리_cli.py enable",
+    "room:disable": "python3 방관리_cli.py disable",
+    "room:remove": "python3 방관리_cli.py remove",
+    "room:members": "python3 방관리_cli.py members",
+    "room:readers": "python3 방관리_cli.py readers",
+    "room:export": "python3 방관리_cli.py export",
     "dev": "tsx src/index.ts"
   },
   "engines": {
