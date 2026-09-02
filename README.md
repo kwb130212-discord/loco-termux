@@ -1,20 +1,30 @@
 # loco-termux
 
-Node.js + TypeScript KakaoTalk bot template using `node-kakao`.
+Node.js + TypeScript Termux bot template using `node-kakao`.
 
 > `node-kakao` is an unofficial client and may stop working or result in service restrictions. Use a test/dedicated account and comply with KakaoTalk's rules.
 
-## Features
+## Current features
 
-- TypeScript project structure
-- `node-kakao` v4.5.0
-- **No `.env` setup required for account configuration**
-- Interactive Termux panel for account registration and room settings
-- Local persistent configuration under `~/.loco-termux/config.json`
-- Password input is hidden in the terminal
-- `!ping`, `!help`, `!echo`, `!args` style bot commands
-- Chat statistics and member join/leave logs
-- Termux-friendly npm scripts
+- TypeScript + strict compiler configuration
+- `node-kakao` 4.5.0 authentication layer
+- Interactive Termux configuration; no `.env` is required for account setup
+- Local persistent configuration at `~/.loco-termux/config.json`
+- Configuration directory `0700` and config file `0600` where supported
+- Automatic config normalization/migration for malformed or older values
+- Multiple account entries with persistent device UUIDs
+- Room allow-list and per-room enabled state
+- Admin/moderator configuration
+- Chat statistics
+- Join/leave event history
+- Command audit log
+- 8-digit `!봇등록` room registration code with a 5-minute lifetime
+- `!핑`, `!명령어`, `!echo`, `!채팅순위`, `!입퇴장로그`, `!봇정보`, `!봇등록`, `!방등록해제`
+- `kick` reply workflow when the underlying channel API exposes a supported member-removal operation
+- Termux bridge management panel with room, admin, settings, logs, statistics and data-maintenance screens
+- `00` returns to the panel from a detail screen
+- Mock login for local UI/testing only
+- Authentication diagnostics that report failures without fabricating sessions
 
 ## Termux setup
 
@@ -29,24 +39,24 @@ npm run build
 npm run start:loco
 ```
 
-### Interactive configuration
+## Panel
 
-After starting the bot, use the panel:
+The bridge panel provides:
 
 ```text
-╔══════════════════════════════════╗
-║          LOCO TERMUX BOT         ║
-╚══════════════════════════════════╝
-
-[+] 1번 봇 시작
-[+] 2번 계정 등록
-[+] 3번 계정 목록
-[+] 4번 방 설정
-[+] 5번 설정 확인
-[+] 6번 종료
+1  방 설정
+2  방 목록
+3  관리자
+4  설정
+5  명령 로그
+6  통계
+7  명령 로그 초기화
+8  데이터 정리
+00 패널 복귀
+9  종료
 ```
 
-Choose **2번 계정 등록** to enter the account in the terminal. The password is entered without echoing it to the screen.
+## Configuration
 
 Configuration is stored locally at:
 
@@ -54,26 +64,31 @@ Configuration is stored locally at:
 ~/.loco-termux/config.json
 ```
 
-The configuration directory is created with restricted permissions and the config file is written with mode `600` where supported by Termux.
+The loader validates and normalizes lists, timestamps, counters, accounts and room configuration. Invalid configuration falls back to safe defaults rather than crashing startup. Persistent statistics and logs are bounded to prevent unbounded growth.
 
 **Do not commit `~/.loco-termux/config.json` or any real credentials to GitHub.**
 
-## Room settings
+## Room registration
 
-Use **4번 방 설정** in the panel to set allowed rooms. The bot only handles commands/events for configured rooms when a room list is present.
+There are two supported ways to configure rooms:
 
-## Commands
+1. Set the allow-list from the Termux panel.
+2. Use `!봇등록` in a room to generate an 8-digit registration code, then send that code in the same room before it expires.
 
-- `!핑`
-- `!명령어`
-- `!echo hello`
-- `!채팅순위`
-- `!입퇴장로그`
-- `!전체보기`
-- `!봇정보`
-- `!봇등록`
-- `!방등록해제`
+When a room allow-list is non-empty, the bot only handles configured rooms. Game-related commands are intentionally not included in this project.
 
-## Notes
+## Authentication
 
-The project does not implement authentication bypasses, packet interception, anti-reversing bypasses, or rate-limit evasion. Authentication remains behind `node-kakao`.
+The login menu contains:
+
+```text
+1. 기본 로그인
+2. QR 로그인
+3. 카카오톡 간편 로그인
+4. 테스트 가짜 로그인
+5. 뒤로가기
+```
+
+Only the authentication APIs actually exposed by the installed library are called. The QR and KakaoTalk-style convenience entries do not invent unsupported endpoints, and no fake session is created when real authentication fails. The mock option is explicitly local/test-only.
+
+The project does not implement authentication bypasses, packet interception, anti-reversing bypasses, or rate-limit evasion.
