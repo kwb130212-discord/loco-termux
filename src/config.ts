@@ -60,9 +60,12 @@ function normalizeStats(value: unknown): ChatStat[] {
 
 function normalizeEvents(value: unknown): MemberEvent[] {
   if (!Array.isArray(value)) return [];
-  return value.filter(Boolean).map((x: any) => ({
-    room: String(x.room ?? '').trim(), userKey: String(x.userKey ?? '').trim(), userName: String(x.userName ?? '알 수 없음'),
-    type: x.type === 'JOIN' ? 'JOIN' : 'LEAVE', at: safeIso(x.at),
+  return value.filter(Boolean).map((x: any): MemberEvent => ({
+    room: String(x.room ?? '').trim(),
+    userKey: String(x.userKey ?? '').trim(),
+    userName: String(x.userName ?? '알 수 없음'),
+    type: x.type === 'JOIN' ? 'JOIN' : 'LEAVE',
+    at: safeIso(x.at),
     count: Number.isFinite(Number(x.count)) ? Math.max(0, Math.floor(Number(x.count))) : 0,
   })).filter(x => x.room && x.userKey).slice(-MAX_EVENTS);
 }
