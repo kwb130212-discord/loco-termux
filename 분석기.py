@@ -161,8 +161,7 @@ class LocoAnalyzer:
     def _save(self) -> None:
         with self._save_condition:
             self._mark_dirty()
-            if self.save_every > 0 and self._event_since_save >= self.save_every:
-                self._save_condition.notify()
+            self._save_condition.notify()
 
     def flush(self) -> None:
         """Synchronously persist the newest in-memory state."""
@@ -189,11 +188,8 @@ class LocoAnalyzer:
             return
         try:
             payload = json.loads(self.data_file.read_text(encoding="utf-8"))
-            raw_events = payload.get("events", [])[-self.max_events:]
-            for raw in raw_events:
-                event = MemberEvent(**raw)
-                self.events.append(event)
-                self._index_event(event)
+            for raw in payload.get("events", [])[-self.max_events:]:
+                self._append_event(MemberEvent(**raw), index_only=True)
             self.pending_leaves = {k: PendingLeave(**v) for k, v in payload.get("pending_leaves", {}).items()}
             self.reads = {str(k): {str(uid): str(nick) for uid, nick in v.items()}
                           for k, v in list(payload.get("reads", {}).items())[-self.max_reads:] if isinstance(v, dict)}
@@ -205,41 +201,41 @@ class LocoAnalyzer:
                 room, _, _ = key.partition("\x1f")
                 self._room_members.setdefault(room, {})[key] = member
             self.session_diagnostics.extend(SessionDiagnostic(**x) for x in payload.get("session_diagnostics", [])[-self.max_diagnostics:])
-            self._rebuild_stats()
+            self._global_stats["reads"] = len(self.reads)
+            self._global_stats["diagnostics"] = len(self.session_diagnostics)
         except (OSError, ValueError, TypeError, KeyError):
             self.events.clear(); self.pending_leaves.clear(); self.reads.clear(); self._read_order.clear()
             self.join_counts.clear(); self.online.clear(); self._room_members.clear(); self._room_events.clear(); self._room_stats.clear()
             self.session_diagnostics.clear(); self._global_stats = {"events": 0, "joins": 0, "leaves": 0, "reads": 0, "diagnostics": 0}
 
-    def _index_event(self, event: MemberEvent) -> None:
+    def _append_event(self, event: MemberEvent, index_only: bool = False) -> None:
+        if len(self.events) == self.max_events:
+            old = self.events.popleft()
+            old_room = self._room_events.get(old.room_id)
+            if old_room:
+                try: old_room.remove(old)
+                except ValueError: pass
+                if not old_room: self._room_events.pop(old.room_id, None)
+            old_stats = self._room_stats.get(old.room_id)
+            if old_stats:
+                old_stats["events"] = max(0, old_stats["events"] - 1)
+                if old.event == "JOIN": old_stats["joins"] = max(0, old_stats["joins"] - 1)
+                elif old.event == "LEAVE": old_stats["leaves"] = max(0, old_stats["leaves"] - 1)
+                if old_stats["events"] == 0: self._room_stats.pop(old.room_id, None)
+            self._global_stats["events"] = max(0, self._global_stats["events"] - 1)
+            if old.event == "JOIN": self._global_stats["joins"] = max(0, self._global_stats["joins"] - 1)
+            elif old.event == "LEAVE": self._global_stats["leaves"] = max(0, self._global_stats["leaves"] - 1)
+        self.events.append(event)
         room = str(event.room_id)
-        bucket = self._room_events.setdefault(room, deque(maxlen=self.max_events))
-        bucket.append(event)
+        self._room_events.setdefault(room, deque(maxlen=self.max_events)).append(event)
         stats = self._room_stats.setdefault(room, {"events": 0, "joins": 0, "leaves": 0})
-        stats["events"] += 1
-        if event.event == "JOIN": stats["joins"] += 1
-        elif event.event == "LEAVE": stats["leaves"] += 1
-        self._global_stats["events"] += 1
-        if event.event == "JOIN": self._global_stats["joins"] += 1
-        elif event.event == "LEAVE": self._global_stats["leaves"] += 1
-
-    def _rebuild_stats(self) -> None:
-        self._global_stats = {"events": 0, "joins": 0, "leaves": 0, "reads": len(self.reads), "diagnostics": len(self.session_diagnostics)}
-        self._room_stats.clear()
-        for event in self.events:
-            room = str(event.room_id)
-            stats = self._room_stats.setdefault(room, {"events": 0, "joins": 0, "leaves": 0})
-            stats["events"] += 1
-            self._global_stats["events"] += 1
-            if event.event == "JOIN": stats["joins"] += 1; self._global_stats["joins"] += 1
-            elif event.event == "LEAVE": stats["leaves"] += 1; self._global_stats["leaves"] += 1
-        for room, members in self._room_members.items():
-            self._room_members[room] = dict(members)
+        stats["events"] += 1; self._global_stats["events"] += 1
+        if event.event == "JOIN": stats["joins"] += 1; self._global_stats["joins"] += 1
+        elif event.event == "LEAVE": stats["leaves"] += 1; self._global_stats["leaves"] += 1
 
     def authenticated_user(self, room_id: str, user_id: str, nickname: str, session_id: str) -> Dict[str, Any]:
         room_id, user_id, nickname, session_id = map(str, (room_id, user_id, nickname, session_id))
-        if not user_id or not session_id:
-            raise ValueError("authenticated_user requires user_id and session_id")
+        if not user_id or not session_id: raise ValueError("authenticated_user requires user_id and session_id")
         count = self.user_joined(room_id, {"user_id": user_id, "nickname": nickname})
         self.record_session_diagnostic(user_id, session_id, "AUTHENTICATED", detail="Verified by analyzer auth adapter")
         return {"ok": True, "authenticated": True, "user_id": user_id, "nickname": nickname, "session_id": session_id, "join_count": count}
@@ -247,23 +243,16 @@ class LocoAnalyzer:
     def user_joined(self, room_id: str, user: object, message_id: Optional[str] = None) -> int:
         room_id = str(room_id); user_id, nickname = self._safe_user(user); key = self._member_key(room_id, user_id); now = self._now()
         with self._lock:
-            count = self.join_counts.get(key, 0) + 1
-            self.join_counts[key] = count
-            member = {"user_id": user_id, "nickname": nickname}
-            self.online[key] = member
-            self._room_members.setdefault(room_id, {})[key] = member
-            self.pending_leaves.pop(key, None)
-            event = MemberEvent(room_id, user_id, nickname, "JOIN", now, count, message_id)
-            if len(self.events) == self.max_events: self.events.popleft()
-            self.events.append(event); self._index_event(event)
+            count = self.join_counts.get(key, 0) + 1; self.join_counts[key] = count
+            member = {"user_id": user_id, "nickname": nickname}; self.online[key] = member
+            self._room_members.setdefault(room_id, {})[key] = member; self.pending_leaves.pop(key, None)
+            self._append_event(MemberEvent(room_id, user_id, nickname, "JOIN", now, count, message_id))
         self._save(); return count
 
     def user_left(self, room_id: str, user: object, message_id: Optional[str] = None) -> str:
         room_id = str(room_id); user_id, nickname = self._safe_user(user); left_at = self._now(); key = self._member_key(room_id, user_id)
         with self._lock:
-            event = MemberEvent(room_id, user_id, nickname, "LEAVE", left_at, 0, message_id)
-            if len(self.events) == self.max_events: self.events.popleft()
-            self.events.append(event); self._index_event(event)
+            self._append_event(MemberEvent(room_id, user_id, nickname, "LEAVE", left_at, 0, message_id))
             self.pending_leaves[key] = PendingLeave(room_id, user_id, nickname, left_at, message_id)
             self.online.pop(key, None); self._room_members.get(room_id, {}).pop(key, None)
         self._save(); return self.leave_message(nickname, left_at)
@@ -274,10 +263,8 @@ class LocoAnalyzer:
             if message_id not in self.reads:
                 if len(self._read_order) >= self.max_reads:
                     old = self._read_order.popleft(); self.reads.pop(old, None)
-                self._read_order.append(message_id)
-                self.reads[message_id] = {}
-            self.reads[message_id][user_id] = nickname
-            self._global_stats["reads"] = len(self.reads)
+                self._read_order.append(message_id); self.reads[message_id] = {}
+            self.reads[message_id][user_id] = nickname; self._global_stats["reads"] = len(self.reads)
         self._save()
 
     def record_session_diagnostic(self, user_id: str, session_id: Optional[str], status: str,
@@ -319,12 +306,13 @@ class LocoAnalyzer:
 
     def room_events(self, room_id: str, limit: int = 100) -> List[MemberEvent]:
         with self._lock:
-            limit = max(0, int(limit)); return list(self._room_events.get(str(room_id), ())) [-limit:] if limit else []
+            limit = max(0, int(limit))
+            if not limit: return []
+            return list(self._room_events.get(str(room_id), ())) [-limit:]
 
     def stats(self, room_id: Optional[str] = None) -> Dict[str, int]:
         with self._lock:
-            if room_id is None:
-                return {**self._global_stats, "online": len(self.online)}
+            if room_id is None: return {**self._global_stats, "online": len(self.online)}
             rid = str(room_id); room = self._room_stats.get(rid, {"events": 0, "joins": 0, "leaves": 0})
             return {"events": room["events"], "joins": room["joins"], "leaves": room["leaves"],
                     "reads": len(self.reads), "online": len(self._room_members.get(rid, {})), "diagnostics": len(self.session_diagnostics)}
