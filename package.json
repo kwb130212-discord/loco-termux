@@ -1,21 +1,20 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": true,
-  "description": "Termux Android Bridge bot with interactive local configuration and persistent room settings",
+  "description": "Termux Android Bridge bot using the repository's Python analyzer as the authentication/state layer",
   "main": "dist/bridge-main.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/bridge-main.js",
-    "start:loco": "node -r ./dist/auth-fix.js -r ./dist/hold-errors.js dist/index.js",
-    "dev": "tsx --require ./src/auth-fix.ts src/bridge-main.ts"
+    "start:loco": "node dist/index.js",
+    "dev": "tsx src/index.ts"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
-    "node-kakao": "4.5.0"
+    "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
