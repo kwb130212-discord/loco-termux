@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { loadConfig, saveConfig, type Account } from './config';
 
@@ -16,18 +16,67 @@ async function ask(prompt: string): Promise<string> {
   finally { rl.close(); }
 }
 
+function runCommand(command: string, args: string[], timeout = 300_000) {
+  return spawnSync(command, args, {
+    encoding: 'utf8',
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+  });
+}
+
 function runPython(args: string[]) {
   const candidates = [process.env.PYTHON_BIN, 'python3', 'python'].filter(Boolean) as string[];
   let last: ReturnType<typeof spawnSync> | null = null;
   for (const command of candidates) {
-    const result = spawnSync(command, args, {
-      encoding: 'utf8', timeout: 210_000, maxBuffer: 1024 * 1024,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    });
+    const result = runCommand(command, args, 210_000);
     last = result;
     if (!result.error) return result;
   }
   return last;
+}
+
+function updateTermux(): void {
+  console.clear();
+  console.log('================================');
+  console.log('       LOCO-TERMUX UPDATE        ');
+  console.log('================================');
+  console.log('[UPDATE] GitHub main 최신 버전 확인 중...');
+
+  const pull = runCommand('git', ['pull', '--ff-only', 'origin', 'main'], 120_000);
+  if (pull.stdout?.trim()) console.log(pull.stdout.trim());
+  if (pull.stderr?.trim()) console.error(pull.stderr.trim());
+  if (pull.error || pull.status !== 0) {
+    console.log(`[FAIL] GitHub 업데이트 실패: ${pull.error?.message ?? `exit=${pull.status}`}`);
+    console.log('[TIP] 로컬 수정사항이 있으면 먼저 커밋/되돌린 뒤 다시 시도하세요.');
+    return;
+  }
+
+  console.log('[UPDATE] 의존성 최신 상태로 동기화 중...');
+  const install = runCommand('npm', ['install'], 300_000);
+  if (install.stdout?.trim()) console.log(install.stdout.trim());
+  if (install.stderr?.trim()) console.error(install.stderr.trim());
+  if (install.error || install.status !== 0) {
+    console.log(`[FAIL] npm install 실패: ${install.error?.message ?? `exit=${install.status}`}`);
+    return;
+  }
+
+  console.log('[UPDATE] 최신 소스 빌드 중...');
+  const build = runCommand('npm', ['run', 'build'], 300_000);
+  if (build.stdout?.trim()) console.log(build.stdout.trim());
+  if (build.stderr?.trim()) console.error(build.stderr.trim());
+  if (build.error || build.status !== 0) {
+    console.log(`[FAIL] 빌드 실패: ${build.error?.message ?? `exit=${build.status}`}`);
+    return;
+  }
+
+  console.log('[OK] 최신 버전 업데이트 완료. 프로그램을 재시작합니다.');
+  const child = spawn(process.execPath, ['dist/bridge-main.js'], { stdio: 'inherit' });
+  child.on('error', error => {
+    console.error(`[FAIL] 재시작 실패: ${error.message}`);
+    process.exitCode = 1;
+  });
+  process.exit(0);
 }
 
 function showPanel(): void {
@@ -43,7 +92,8 @@ function showPanel(): void {
   console.log('2. Kakao OAuth 로그인');
   console.log('3. OAuth 설정');
   console.log('4. 현재 상태');
-  console.log('5. 종료');
+  console.log('5. GitHub 최신버전 업데이트');
+  console.log('6. 종료');
   console.log('================================');
 }
 
@@ -141,7 +191,9 @@ async function main(): Promise<void> {
       console.log(`로그인=${loggedIn}`);
       console.log(`세션=${sessionId || '없음'}`);
       await ask('엔터 > ');
-    } else if (choice === '5' || choice === 'exit') {
+    } else if (choice === '5') {
+      updateTermux();
+    } else if (choice === '6' || choice === 'exit') {
       saveConfig(config);
       return;
     }
