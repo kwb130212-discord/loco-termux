@@ -1,6 +1,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { loadConfig, saveConfig, roomListToString, type ChatStat, type CommandLog } from './config';
+import { sendWebhook } from './webhook';
 
 export type BridgeUser = { id?: string | number; name?: string };
 export type BridgeEvent = { type: 'chat' | 'member_join' | 'member_leave'; room: string; user?: BridgeUser; text?: string; timestamp?: number };
@@ -28,6 +29,7 @@ function addCommandLog(room: string, user: BridgeUser | undefined, command: stri
   config.commandLogs.push(item);
   if (config.commandLogs.length > 5000) config.commandLogs.splice(0, config.commandLogs.length - 5000);
   console.log(`[CMD] ${item.at} | ${room} | ${item.userName} | ${command} | ${result}`);
+  void sendWebhook(config, '명령어 로그', `방: ${room}\n사용자: ${item.userName}\n명령어: ${command}\n결과: ${result}`, 'INFO');
 }
 
 function memberLog(room: string, user: BridgeUser | undefined, type: 'JOIN' | 'LEAVE', timestamp: number): string {
@@ -36,11 +38,12 @@ function memberLog(room: string, user: BridgeUser | undefined, type: 'JOIN' | 'L
   const count = joins + (type === 'JOIN' ? 1 : 0);
   config.memberEvents.push({ room, userKey: key, userName: name, type, at: new Date(timestamp).toISOString(), count });
   if (config.memberEvents.length > 2000) config.memberEvents.splice(0, config.memberEvents.length - 2000);
-  return type === 'JOIN' ? `@${name}님이 ${room}에 입장하셨습니다.\n\n[+] ${nowText(timestamp)} ${count === 1 ? '첫 입장' : '입장'}\n[+] ${count}번째 입장` : `@${name}님이 ${room}에서 나가셨습니다.\n\n[+] ${nowText(timestamp)} 퇴장`;
+  const text = type === 'JOIN' ? `@${name}님이 ${room}에 입장하셨습니다.\n\n[+] ${nowText(timestamp)} ${count === 1 ? '첫 입장' : '입장'}\n[+] ${count}번째 입장` : `@${name}님이 ${room}에서 나가셨습니다.\n\n[+] ${nowText(timestamp)} 퇴장`;
+  void sendWebhook(config, type === 'JOIN' ? '입장 로그' : '퇴장 로그', `방: ${room}\n사용자: ${name}\n${type === 'JOIN' ? `입장 횟수: ${count}` : '퇴장'}`, 'INFO');
+  return text;
 }
 
 function help(): string { return ['📖 명령어', '', '!핑', '!명령어', '!채팅순위', '!입퇴장로그', '!전체보기', '!봇정보', '!봇등록', '!방등록해제'].join('\n'); }
-
 function command(room: string, text: string): string | null {
   if (!text.startsWith(config.prefix) || !allowedRoom(room)) return null;
   const [raw, ...args] = text.slice(config.prefix.length).trim().split(/\s+/);
@@ -55,7 +58,6 @@ function command(room: string, text: string): string | null {
   if (cmd === '입퇴장로그' || cmd === '전체보기') { const rows = config.memberEvents.filter(e => e.room === room).slice(cmd === '전체보기' ? -100 : -50).reverse(); return rows.length ? ['📋 입퇴장 로그', ...rows.map(e => `${e.type === 'JOIN' ? '[+]' : '[-]'} ${nowText(new Date(e.at).getTime())} ${e.userName} — ${e.type === 'JOIN' ? `입장 (${e.count}번째)` : '퇴장'}`)].join('\n') : '📋 아직 입퇴장 기록이 없습니다.'; }
   return null;
 }
-
 function readBody(req: http.IncomingMessage): Promise<string> { return new Promise((resolve, reject) => { let body = ''; req.setEncoding('utf8'); req.on('data', chunk => { body += chunk; if (body.length > 512 * 1024) reject(new Error('request too large')); }); req.on('end', () => resolve(body)); req.on('error', reject); }); }
 
 const server = http.createServer(async (req, res) => {
