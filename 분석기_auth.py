@@ -9,7 +9,7 @@ submits a Kakao account password, fabricates a session, or ignores failures.
 from dataclasses import dataclass, asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 import json
 import secrets
@@ -168,7 +168,7 @@ def logout_session(session: OAuthSession) -> None:
         raise KakaoOAuthError(f"Kakao logout connection failed: {exc}") from exc
 
 
-def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180) -> str:
+def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180, on_ready: Optional[Callable[[], None]] = None) -> str:
     parsed = urlparse(redirect_uri)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
         raise KakaoOAuthError("Automatic callback requires an http://127.0.0.1 or localhost redirect URI")
@@ -198,8 +198,13 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
         def log_message(self, *_args):
             return
 
-    server = HTTPServer((parsed.hostname, parsed.port), Handler)
+    try:
+        server = HTTPServer((parsed.hostname, parsed.port), Handler)
+    except OSError as exc:
+        raise KakaoOAuthError(f"Could not start local OAuth callback server on {parsed.hostname}:{parsed.port}: {exc}") from exc
     server.timeout = 1
+    if on_ready:
+        on_ready()
     deadline = time.time() + timeout
     try:
         while time.time() < deadline and not result:
@@ -214,14 +219,19 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
 def login_interactive(client_id: str, client_secret: str, redirect_uri: str, login_hint: str = "") -> OAuthSession:
     state = secrets.token_urlsafe(32)
     url = build_authorize_url(client_id, redirect_uri, state, login_hint)
-    print("[AUTH] Open this Kakao Login URL in a browser:")
-    print(url)
-    try: webbrowser.open(url)
-    except Exception: pass
     parsed = urlparse(redirect_uri)
     if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
-        code = wait_for_callback(redirect_uri, state)
+        def open_browser() -> None:
+            print("[AUTH] Open this Kakao Login URL in a browser:")
+            print(url)
+            try: webbrowser.open(url)
+            except Exception: pass
+        code = wait_for_callback(redirect_uri, state, on_ready=open_browser)
     else:
+        print("[AUTH] Open this Kakao Login URL in a browser:")
+        print(url)
+        try: webbrowser.open(url)
+        except Exception: pass
         callback = input("[AUTH] After login, paste the full callback URL here: ").strip()
         query = parse_qs(urlparse(callback).query)
         if query.get("state", [""])[0] != state: raise KakaoOAuthError("OAuth state mismatch")
