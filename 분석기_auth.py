@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
 import json
 import secrets
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -153,11 +154,7 @@ def login_from_code(client_id: str, client_secret: str, redirect_uri: str, code:
 
 def logout_session(session: OAuthSession) -> None:
     """Log out the current Kakao access token without unlinking the account."""
-    request = urllib.request.Request(
-        LOGOUT_URL,
-        headers={"Authorization": f"Bearer {session.access_token}"},
-        method="POST",
-    )
+    request = urllib.request.Request(LOGOUT_URL, headers={"Authorization": f"Bearer {session.access_token}"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             response.read()
@@ -168,7 +165,40 @@ def logout_session(session: OAuthSession) -> None:
         raise KakaoOAuthError(f"Kakao logout connection failed: {exc}") from exc
 
 
-def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180, on_ready: Optional[Callable[[], None]] = None) -> str:
+def _open_browser(url: str) -> bool:
+    """Open a URL reliably from Termux/Android, then fall back to Python webbrowser."""
+    try:
+        result = subprocess.run(
+            ["am", "start", "-a", "android.intent.action.VIEW", "-d", url],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
+def _manual_callback(expected_state: str) -> str:
+    print("[AUTH] 자동 복귀가 되지 않았습니다.")
+    print("[AUTH] 브라우저 주소창의 callback URL 전체를 복사해서 아래에 붙여넣으세요.")
+    callback = input("[AUTH] Callback URL: ").strip()
+    query = parse_qs(urlparse(callback).query)
+    if query.get("state", [""])[0] != expected_state:
+        raise KakaoOAuthError("OAuth state mismatch")
+    if query.get("error", [""])[0]:
+        raise KakaoOAuthError(query.get("error_description", query["error"])[0])
+    code = query.get("code", [""])[0]
+    if not code:
+        raise KakaoOAuthError("Callback URL did not contain an authorization code")
+    return code
+
+
+def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 120, on_ready: Optional[Callable[[], None]] = None) -> str:
     parsed = urlparse(redirect_uri)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
         raise KakaoOAuthError("Automatic callback requires an http://127.0.0.1 or localhost redirect URI")
@@ -211,9 +241,11 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
             server.handle_request()
     finally:
         server.server_close()
-    if result.get("error"): raise KakaoOAuthError(result["error"])
-    if not result.get("code"): raise KakaoOAuthError("Timed out waiting for Kakao OAuth callback")
-    return result["code"]
+    if result.get("error"):
+        raise KakaoOAuthError(result["error"])
+    if result.get("code"):
+        return result["code"]
+    raise KakaoOAuthError("Timed out waiting for Kakao OAuth callback")
 
 
 def login_interactive(client_id: str, client_secret: str, redirect_uri: str, login_hint: str = "") -> OAuthSession:
@@ -222,22 +254,29 @@ def login_interactive(client_id: str, client_secret: str, redirect_uri: str, log
     parsed = urlparse(redirect_uri)
     if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
         def open_browser() -> None:
-            print("[AUTH] Open this Kakao Login URL in a browser:")
+            print("[AUTH] Kakao Login URL:")
             print(url)
-            try: webbrowser.open(url)
-            except Exception: pass
-        code = wait_for_callback(redirect_uri, state, on_ready=open_browser)
-    else:
-        print("[AUTH] Open this Kakao Login URL in a browser:")
-        print(url)
-        try: webbrowser.open(url)
-        except Exception: pass
-        callback = input("[AUTH] After login, paste the full callback URL here: ").strip()
-        query = parse_qs(urlparse(callback).query)
-        if query.get("state", [""])[0] != state: raise KakaoOAuthError("OAuth state mismatch")
-        if query.get("error", [""])[0]: raise KakaoOAuthError(query.get("error_description", query["error"])[0])
-        code = query.get("code", [""])[0]
-        if not code: raise KakaoOAuthError("Callback URL did not contain an authorization code")
+            opened = _open_browser(url)
+            print("[AUTH] Android browser open: " + ("OK" if opened else "FAILED"))
+        try:
+            return login_from_code(client_id, client_secret, redirect_uri, wait_for_callback(redirect_uri, state, on_ready=open_browser))
+        except KakaoOAuthError as exc:
+            if not str(exc).startswith("Timed out waiting for Kakao OAuth callback"):
+                raise
+            return login_from_code(client_id, client_secret, redirect_uri, _manual_callback(state))
+
+    print("[AUTH] Kakao Login URL:")
+    print(url)
+    _open_browser(url)
+    callback = input("[AUTH] After login, paste the full callback URL here: ").strip()
+    query = parse_qs(urlparse(callback).query)
+    if query.get("state", [""])[0] != state:
+        raise KakaoOAuthError("OAuth state mismatch")
+    if query.get("error", [""])[0]:
+        raise KakaoOAuthError(query.get("error_description", query["error"])[0])
+    code = query.get("code", [""])[0]
+    if not code:
+        raise KakaoOAuthError("Callback URL did not contain an authorization code")
     return login_from_code(client_id, client_secret, redirect_uri, code)
 
 
