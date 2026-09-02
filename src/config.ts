@@ -28,6 +28,7 @@ export type Config = {
 
 const DATA_DIR = path.join(os.homedir(), '.loco-termux');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const DEFAULT_REDIRECT_URI = 'http://127.0.0.1:8765/callback';
 const MAX_STATS = 5000;
 const MAX_EVENTS = 5000;
 const MAX_COMMAND_LOGS = 5000;
@@ -78,7 +79,7 @@ export function loadConfig(): Config {
   ensureDataDir();
   const defaults: Config = {
     prefix: '!', rooms: [], accounts: [], activeAccount: null,
-    kakao: { clientId: '', clientSecret: '', redirectUri: '' },
+    kakao: { clientId: '', clientSecret: '', redirectUri: DEFAULT_REDIRECT_URI },
     roomConfigs: {}, admins: [], moderators: [], logLevel: 'info',
     chatStats: [], memberEvents: [], commandLogs: [], webhook: { enabled: false, url: '', username: 'LOCO-Termux Logger' },
   };
@@ -104,7 +105,7 @@ export function loadConfig(): Config {
       kakao: {
         clientId: typeof rawKakao.clientId === 'string' ? rawKakao.clientId.trim() : '',
         clientSecret: typeof rawKakao.clientSecret === 'string' ? rawKakao.clientSecret.trim() : '',
-        redirectUri: typeof rawKakao.redirectUri === 'string' ? rawKakao.redirectUri.trim() : '',
+        redirectUri: typeof rawKakao.redirectUri === 'string' && rawKakao.redirectUri.trim() ? rawKakao.redirectUri.trim() : DEFAULT_REDIRECT_URI,
       },
       roomConfigs, admins: stringList(parsed.admins), moderators: stringList(parsed.moderators),
       logLevel: parsed.logLevel === 'debug' ? 'debug' : 'info', chatStats: normalizeStats(parsed.chatStats),
@@ -131,7 +132,7 @@ export function saveConfig(config: Config): void {
     kakao: {
       clientId: String(config.kakao.clientId ?? '').trim(),
       clientSecret: String(config.kakao.clientSecret ?? '').trim(),
-      redirectUri: String(config.kakao.redirectUri ?? '').trim(),
+      redirectUri: String(config.kakao.redirectUri ?? DEFAULT_REDIRECT_URI).trim() || DEFAULT_REDIRECT_URI,
     },
     webhook: { enabled: config.webhook.enabled === true, url: String(config.webhook.url ?? '').trim(), username: String(config.webhook.username ?? 'LOCO-Termux Logger').slice(0, 80) },
   };
