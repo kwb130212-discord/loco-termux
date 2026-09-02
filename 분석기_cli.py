@@ -7,6 +7,8 @@ This adapter deliberately delegates the test-login state transition to
 """
 
 import argparse
+import contextlib
+import io
 import json
 from 분석기 import LocoAnalyzer
 
@@ -21,12 +23,18 @@ def main() -> int:
 
     analyzer = LocoAnalyzer()
     if args.mock_login:
-        session = analyzer.mock_login(
-            args.user_id,
-            args.nickname,
-            args.room_id,
-            force_success=True,
-        )
+        # 분석기.py는 테스트용 상태 메시지를 stdout에 출력한다.
+        # 패널은 stdout을 JSON IPC 채널로 사용하므로 해당 출력을 분리한다.
+        analyzer_stdout = io.StringIO()
+        with contextlib.redirect_stdout(analyzer_stdout):
+            session = analyzer.mock_login(
+                args.user_id,
+                args.nickname,
+                args.room_id,
+                force_success=True,
+            )
+            diagnostic = analyzer.diagnose_999(session.user_id)
+
         print(json.dumps({
             "ok": True,
             "mode": session.mode,
@@ -34,7 +42,7 @@ def main() -> int:
             "user_id": session.user_id,
             "nickname": session.nickname,
             "session_id": session.session_id,
-            "diagnostic": analyzer.diagnose_999(session.user_id),
+            "diagnostic": diagnostic,
         }, ensure_ascii=False))
         return 0
 
