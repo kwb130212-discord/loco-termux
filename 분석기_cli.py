@@ -3,6 +3,8 @@ from __future__ import annotations
 """CLI adapter for the analyzer's real Kakao OAuth authentication."""
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 from 분석기 import LocoAnalyzer
@@ -27,12 +29,16 @@ def main() -> int:
         return 2
 
     try:
-        session = login_interactive(
-            args.client_id,
-            args.client_secret,
-            args.redirect_uri,
-            args.login_hint,
-        )
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            session = login_interactive(
+                args.client_id,
+                args.client_secret,
+                args.redirect_uri,
+                args.login_hint,
+            )
+        if captured.getvalue().strip():
+            print(captured.getvalue().strip(), file=sys.stderr)
         save_session(session, args.session_file)
         analyzer = LocoAnalyzer()
         analyzer.user_joined("local", {"user_id": session.user_id, "nickname": session.nickname})
@@ -49,10 +55,7 @@ def main() -> int:
             "user_id": session.user_id,
             "nickname": session.nickname,
             "session_id": f"oauth_{session.user_id}_{session.created_at}",
-            "diagnostic": {
-                "status": "AUTHENTICATED",
-                "error_code": None,
-            },
+            "diagnostic": {"status": "AUTHENTICATED", "error_code": None},
             "session": session.public(),
         }, ensure_ascii=False))
         return 0
