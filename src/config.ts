@@ -9,36 +9,148 @@ export type ChatStat = { room: string; userKey: string; userName: string; count:
 export type MemberEvent = { room: string; userKey: string; userName: string; type: 'JOIN' | 'LEAVE'; at: string; count: number };
 export type CommandLog = { at: string; room: string; userKey: string; userName: string; command: string; result: string };
 export type Config = {
-  prefix: string; rooms: string[]; accounts: Account[]; activeAccount: string | null;
-  roomConfigs: Record<string, RoomConfig>; admins: string[]; moderators: string[];
-  logLevel: 'info' | 'debug'; chatStats: ChatStat[]; memberEvents: MemberEvent[]; commandLogs: CommandLog[];
+  prefix: string;
+  rooms: string[];
+  accounts: Account[];
+  activeAccount: string | null;
+  roomConfigs: Record<string, RoomConfig>;
+  admins: string[];
+  moderators: string[];
+  logLevel: 'info' | 'debug';
+  chatStats: ChatStat[];
+  memberEvents: MemberEvent[];
+  commandLogs: CommandLog[];
 };
 
 const DATA_DIR = path.join(os.homedir(), '.loco-termux');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const MAX_STATS = 5000;
+const MAX_EVENTS = 5000;
+const MAX_COMMAND_LOGS = 5000;
 
-export function ensureDataDir(): void { fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 }); }
+export function ensureDataDir(): void {
+  fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(DATA_DIR, 0o700); } catch { /* Some Android filesystems ignore chmod. */ }
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((v): v is string => typeof v === 'string').map(v => v.trim()).filter(Boolean))];
+}
+
+function safeIso(value: unknown): string {
+  if (typeof value !== 'string') return new Date().toISOString();
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
+}
+
+function normalizeStats(value: unknown): ChatStat[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(Boolean).map((x: any) => ({
+    room: String(x.room ?? '').trim(),
+    userKey: String(x.userKey ?? '').trim(),
+    userName: String(x.userName ?? '알 수 없음'),
+    count: Number.isFinite(Number(x.count)) ? Math.max(0, Math.floor(Number(x.count))) : 0,
+    firstSeenAt: safeIso(x.firstSeenAt),
+    lastSeenAt: safeIso(x.lastSeenAt),
+  })).filter(x => x.room && x.userKey).slice(-MAX_STATS);
+}
+
+function normalizeEvents(value: unknown): MemberEvent[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(Boolean).map((x: any) => ({
+    room: String(x.room ?? '').trim(),
+    userKey: String(x.userKey ?? '').trim(),
+    userName: String(x.userName ?? '알 수 없음'),
+    type: x.type === 'JOIN' ? 'JOIN' : 'LEAVE',
+    at: safeIso(x.at),
+    count: Number.isFinite(Number(x.count)) ? Math.max(0, Math.floor(Number(x.count))) : 0,
+  })).filter(x => x.room && x.userKey).slice(-MAX_EVENTS);
+}
+
+function normalizeCommandLogs(value: unknown): CommandLog[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(Boolean).map((x: any) => ({
+    at: safeIso(x.at),
+    room: String(x.room ?? '').trim(),
+    userKey: String(x.userKey ?? '').trim(),
+    userName: String(x.userName ?? '알 수 없음'),
+    command: String(x.command ?? '').trim(),
+    result: String(x.result ?? '').trim(),
+  })).filter(x => x.room && x.command).slice(-MAX_COMMAND_LOGS);
+}
 
 export function loadConfig(): Config {
   ensureDataDir();
-  const defaults: Config = { prefix: '!', rooms: [], accounts: [], activeAccount: null, roomConfigs: {}, admins: [], moderators: [], logLevel: 'info', chatStats: [], memberEvents: [], commandLogs: [] };
+  const defaults: Config = {
+    prefix: '!', rooms: [], accounts: [], activeAccount: null,
+    roomConfigs: {}, admins: [], moderators: [], logLevel: 'info',
+    chatStats: [], memberEvents: [], commandLogs: [],
+  };
   if (!fs.existsSync(CONFIG_FILE)) return defaults;
+
   try {
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config> & { accounts?: Array<Account & { name?: string }> };
-    const accounts: Account[] = Array.isArray(parsed.accounts) ? parsed.accounts.filter(a => a && typeof a.email === 'string' && typeof a.password === 'string').map(a => ({ email: a.email.trim(), password: a.password, deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid ? a.deviceUuid : crypto.randomUUID() })) : [];
-    return {
-      ...defaults, ...parsed,
-      rooms: Array.isArray(parsed.rooms) ? [...new Set(parsed.rooms.filter(Boolean))] : [],
-      accounts, activeAccount: typeof parsed.activeAccount === 'string' ? parsed.activeAccount : accounts[0]?.email ?? null,
-      roomConfigs: parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs : {},
-      admins: Array.isArray(parsed.admins) ? parsed.admins.filter(Boolean) : [], moderators: Array.isArray(parsed.moderators) ? parsed.moderators.filter(Boolean) : [],
-      chatStats: Array.isArray(parsed.chatStats) ? parsed.chatStats : [], memberEvents: Array.isArray(parsed.memberEvents) ? parsed.memberEvents : [], commandLogs: Array.isArray(parsed.commandLogs) ? parsed.commandLogs : [],
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) as Partial<Config> & {
+      accounts?: Array<Partial<Account> & { name?: string }>;
     };
-  } catch { return defaults; }
+    const accounts: Account[] = Array.isArray(parsed.accounts)
+      ? parsed.accounts.filter(a => a && typeof a.email === 'string' && typeof a.password === 'string')
+        .map(a => ({
+          email: a.email!.trim(),
+          password: a.password!,
+          deviceUuid: typeof a.deviceUuid === 'string' && a.deviceUuid.trim() ? a.deviceUuid.trim() : crypto.randomUUID(),
+        })).filter(a => a.email)
+      : [];
+
+    const rooms = stringList(parsed.rooms);
+    const rawRoomConfigs = parsed.roomConfigs && typeof parsed.roomConfigs === 'object' ? parsed.roomConfigs : {};
+    const roomConfigs: Record<string, RoomConfig> = {};
+    for (const room of rooms) roomConfigs[room] = { name: room, enabled: rawRoomConfigs[room]?.enabled !== false };
+
+    const normalized: Config = {
+      ...defaults,
+      prefix: typeof parsed.prefix === 'string' && parsed.prefix.trim() ? parsed.prefix.trim().slice(0, 8) : defaults.prefix,
+      rooms,
+      accounts,
+      activeAccount: typeof parsed.activeAccount === 'string' && accounts.some(a => a.email === parsed.activeAccount)
+        ? parsed.activeAccount : accounts[0]?.email ?? null,
+      roomConfigs,
+      admins: stringList(parsed.admins),
+      moderators: stringList(parsed.moderators),
+      logLevel: parsed.logLevel === 'debug' ? 'debug' : 'info',
+      chatStats: normalizeStats(parsed.chatStats),
+      memberEvents: normalizeEvents(parsed.memberEvents),
+      commandLogs: normalizeCommandLogs(parsed.commandLogs),
+    };
+    return normalized;
+  } catch (error) {
+    console.error('[CONFIG] config.json 읽기 실패. 기본 설정으로 시작합니다:', error instanceof Error ? error.message : error);
+    return defaults;
+  }
 }
 
 export function saveConfig(config: Config): void {
-  ensureDataDir(); const tmp = `${CONFIG_FILE}.tmp`; fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 }); fs.renameSync(tmp, CONFIG_FILE); try { fs.chmodSync(CONFIG_FILE, 0o600); } catch { /* Termux */ }
+  ensureDataDir();
+  const tmp = `${CONFIG_FILE}.${process.pid}.tmp`;
+  const safe: Config = {
+    ...config,
+    rooms: stringList(config.rooms),
+    admins: stringList(config.admins),
+    moderators: stringList(config.moderators),
+    chatStats: config.chatStats.slice(-MAX_STATS),
+    memberEvents: config.memberEvents.slice(-MAX_EVENTS),
+    commandLogs: config.commandLogs.slice(-MAX_COMMAND_LOGS),
+  };
+  fs.writeFileSync(tmp, JSON.stringify(safe, null, 2), { encoding: 'utf8', mode: 0o600 });
+  try { fs.chmodSync(tmp, 0o600); } catch { /* Termux */ }
+  fs.renameSync(tmp, CONFIG_FILE);
+  try { fs.chmodSync(CONFIG_FILE, 0o600); } catch { /* Termux */ }
 }
-export function parseRoomList(input: string): string[] { return [...new Set(input.split(',').map(v => v.trim()).filter(Boolean))]; }
-export function roomListToString(rooms: string[]): string { return `,${rooms.join(',')},`; }
+
+export function parseRoomList(input: string): string[] {
+  return stringList(input.split(','));
+}
+
+export function roomListToString(rooms: string[]): string {
+  return `,${rooms.join(',')},`;
+}
