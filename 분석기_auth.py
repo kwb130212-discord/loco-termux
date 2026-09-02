@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """Real Kakao Login OAuth adapter for the analyzer.
 
-This module uses Kakao's documented OAuth authorization-code flow. It never
-accepts or submits a Kakao account password, fabricates a session, or ignores
-server authentication failures.
+Uses Kakao's documented OAuth authorization-code flow. It never accepts or
+submits a Kakao account password, fabricates a session, or ignores failures.
 """
 
 from dataclasses import dataclass, asdict
@@ -18,7 +17,6 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-
 
 AUTH_URL = "https://kauth.kakao.com/oauth/authorize"
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
@@ -44,6 +42,12 @@ class OAuthSession:
         value.pop("refresh_token", None)
         return value
 
+    def access_expires_at(self) -> int:
+        return self.created_at + max(0, self.expires_in)
+
+    def needs_refresh(self, skew: int = 60) -> bool:
+        return int(time.time()) >= self.access_expires_at() - max(0, skew)
+
 
 class KakaoOAuthError(RuntimeError):
     pass
@@ -51,16 +55,10 @@ class KakaoOAuthError(RuntimeError):
 
 def _post_form(url: str, data: dict[str, str], timeout: int = 20) -> dict:
     body = urlencode(data).encode()
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
+    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
-            return json.loads(raw)
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:1000]
         raise KakaoOAuthError(f"Kakao token endpoint HTTP {exc.code}: {detail}") from exc
@@ -71,11 +69,7 @@ def _post_form(url: str, data: dict[str, str], timeout: int = 20) -> dict:
 
 
 def _get_json(url: str, access_token: str, timeout: int = 20) -> dict:
-    request = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {access_token}"},
-        method="GET",
-    )
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"}, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
@@ -87,25 +81,47 @@ def _get_json(url: str, access_token: str, timeout: int = 20) -> dict:
 
 
 def build_authorize_url(client_id: str, redirect_uri: str, state: str, login_hint: str = "") -> str:
-    params = {
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "state": state,
-    }
+    params = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "state": state}
     if login_hint:
         params["login_hint"] = login_hint
     return f"{AUTH_URL}?{urlencode(params)}"
 
 
 def exchange_code(client_id: str, client_secret: str, redirect_uri: str, code: str) -> dict:
-    return _post_form(TOKEN_URL, {
-        "grant_type": "authorization_code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "code": code,
-        "client_secret": client_secret,
-    })
+    data = {"grant_type": "authorization_code", "client_id": client_id, "redirect_uri": redirect_uri, "code": code}
+    if client_secret:
+        data["client_secret"] = client_secret
+    return _post_form(TOKEN_URL, data)
+
+
+def refresh_session(client_id: str, client_secret: str, session: OAuthSession) -> OAuthSession:
+    if not session.refresh_token:
+        raise KakaoOAuthError("No refresh token is available; interactive login is required")
+    data = {"grant_type": "refresh_token", "client_id": client_id, "refresh_token": session.refresh_token}
+    if client_secret:
+        data["client_secret"] = client_secret
+    token = _post_form(TOKEN_URL, data)
+    access_token = str(token.get("access_token", ""))
+    if not access_token:
+        raise KakaoOAuthError("Kakao did not issue a refreshed access token")
+    return OAuthSession(
+        access_token=access_token,
+        refresh_token=str(token.get("refresh_token") or session.refresh_token),
+        token_type=str(token.get("token_type", session.token_type)),
+        expires_in=int(token.get("expires_in", 0) or 0),
+        refresh_token_expires_in=(int(token["refresh_token_expires_in"]) if token.get("refresh_token_expires_in") else session.refresh_token_expires_in),
+        user_id=session.user_id,
+        nickname=session.nickname,
+        created_at=int(time.time()),
+    )
+
+
+def validate_session(session: OAuthSession) -> dict:
+    profile = _get_json(ME_URL, session.access_token)
+    account_id = profile.get("id")
+    if account_id is None or str(account_id) != str(session.user_id):
+        raise KakaoOAuthError("Kakao user identity validation failed")
+    return profile
 
 
 def login_from_code(client_id: str, client_secret: str, redirect_uri: str, code: str) -> OAuthSession:
@@ -113,7 +129,6 @@ def login_from_code(client_id: str, client_secret: str, redirect_uri: str, code:
     access_token = str(token.get("access_token", ""))
     if not access_token:
         raise KakaoOAuthError("Kakao did not issue an access token")
-
     profile = _get_json(ME_URL, access_token)
     account_id = profile.get("id")
     if account_id is None:
@@ -126,9 +141,7 @@ def login_from_code(client_id: str, client_secret: str, redirect_uri: str, code:
         token_type=str(token.get("token_type", "bearer")),
         expires_in=int(token.get("expires_in", 0) or 0),
         refresh_token_expires_in=(int(token["refresh_token_expires_in"]) if token.get("refresh_token_expires_in") else None),
-        user_id=str(account_id),
-        nickname=nickname,
-        created_at=int(time.time()),
+        user_id=str(account_id), nickname=nickname, created_at=int(time.time()),
     )
 
 
@@ -138,7 +151,6 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
         raise KakaoOAuthError("Automatic callback requires an http://127.0.0.1 or localhost redirect URI")
     if not parsed.port:
         raise KakaoOAuthError("Local redirect URI must include an explicit port")
-
     result: dict[str, str] = {}
     path = parsed.path or "/"
 
@@ -146,9 +158,7 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
         def do_GET(self):
             incoming = urlparse(self.path)
             if incoming.path != path:
-                self.send_response(404)
-                self.end_headers()
-                return
+                self.send_response(404); self.end_headers(); return
             query = parse_qs(incoming.query)
             if query.get("state", [""])[0] != expected_state:
                 result["error"] = "OAuth state mismatch"
@@ -156,8 +166,7 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
                 result["error"] = query.get("error_description", query["error"])[0]
             else:
                 result["code"] = query.get("code", [""])[0]
-                if not result["code"]:
-                    result["error"] = "Callback did not contain an authorization code"
+                if not result["code"]: result["error"] = "Callback did not contain an authorization code"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
@@ -174,10 +183,8 @@ def wait_for_callback(redirect_uri: str, expected_state: str, timeout: int = 180
             server.handle_request()
     finally:
         server.server_close()
-    if result.get("error"):
-        raise KakaoOAuthError(result["error"])
-    if not result.get("code"):
-        raise KakaoOAuthError("Timed out waiting for Kakao OAuth callback")
+    if result.get("error"): raise KakaoOAuthError(result["error"])
+    if not result.get("code"): raise KakaoOAuthError("Timed out waiting for Kakao OAuth callback")
     return result["code"]
 
 
@@ -186,43 +193,30 @@ def login_interactive(client_id: str, client_secret: str, redirect_uri: str, log
     url = build_authorize_url(client_id, redirect_uri, state, login_hint)
     print("[AUTH] Open this Kakao Login URL in a browser:")
     print(url)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-
+    try: webbrowser.open(url)
+    except Exception: pass
     parsed = urlparse(redirect_uri)
     if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}:
         code = wait_for_callback(redirect_uri, state)
     else:
         callback = input("[AUTH] After login, paste the full callback URL here: ").strip()
         query = parse_qs(urlparse(callback).query)
-        if query.get("state", [""])[0] != state:
-            raise KakaoOAuthError("OAuth state mismatch")
-        if query.get("error", [""])[0]:
-            raise KakaoOAuthError(query.get("error_description", query["error"])[0])
+        if query.get("state", [""])[0] != state: raise KakaoOAuthError("OAuth state mismatch")
+        if query.get("error", [""])[0]: raise KakaoOAuthError(query.get("error_description", query["error"])[0])
         code = query.get("code", [""])[0]
-        if not code:
-            raise KakaoOAuthError("Callback URL did not contain an authorization code")
+        if not code: raise KakaoOAuthError("Callback URL did not contain an authorization code")
     return login_from_code(client_id, client_secret, redirect_uri, code)
 
 
 def save_session(session: OAuthSession, path: str) -> None:
-    target = Path(path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target = Path(path).expanduser(); target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(asdict(session), ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        target.chmod(0o600)
-    except OSError:
-        pass
+    try: target.chmod(0o600)
+    except OSError: pass
 
 
 def load_session(path: str) -> Optional[OAuthSession]:
     target = Path(path).expanduser()
-    if not target.exists():
-        return None
-    try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-        return OAuthSession(**raw)
-    except (OSError, ValueError, TypeError, KeyError):
-        return None
+    if not target.exists(): return None
+    try: return OAuthSession(**json.loads(target.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, KeyError): return None
