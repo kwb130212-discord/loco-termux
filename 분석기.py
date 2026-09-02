@@ -5,7 +5,6 @@ from __future__ import annotations
 Authentication is not fabricated here. Real authentication is performed by
 분석기_auth.py through Kakao's documented OAuth authorization-code flow; this
 module records the resulting authenticated identity and observable room state.
-It never creates fake sessions, ignores server errors, or bypasses permissions.
 """
 
 from dataclasses import dataclass, asdict
@@ -47,17 +46,21 @@ class SessionDiagnostic:
 
 
 class LocoAnalyzer:
-    """Thread-safe room/member analyzer with persistent state and diagnostics."""
+    """Thread-safe analyzer optimized for high-frequency event workloads."""
 
     VALID_EVENTS = {"JOIN", "LEAVE", "READ", "KICK"}
 
     def __init__(self, data_file: str = "loco_analyzer.json", max_events: int = 5000,
-                 max_reads: int = 5000, max_diagnostics: int = 1000):
+                 max_reads: int = 5000, max_diagnostics: int = 1000,
+                 save_delay: float = 0.25):
         self.data_file = Path(data_file)
         self.max_events = max(1, int(max_events))
         self.max_reads = max(1, int(max_reads))
         self.max_diagnostics = max(1, int(max_diagnostics))
+        self.save_delay = max(0.0, float(save_delay))
         self._lock = threading.RLock()
+        self._save_timer: Optional[threading.Timer] = None
+        self._save_pending = False
         self.events: List[MemberEvent] = []
         self.pending_leaves: Dict[str, PendingLeave] = {}
         self.reads: Dict[str, Dict[str, str]] = {}
@@ -93,10 +96,10 @@ class LocoAnalyzer:
     def _member_key(room_id: str, user_id: str) -> str:
         return f"{room_id}\x1f{user_id}"
 
-    def _save(self) -> None:
+    def _save_now(self) -> None:
         with self._lock:
             payload = {
-                "version": 3,
+                "version": 4,
                 "events": [asdict(e) for e in self.events[-self.max_events:]],
                 "pending_leaves": {k: asdict(v) for k, v in self.pending_leaves.items()},
                 "reads": dict(list(self.reads.items())[-self.max_reads:]),
@@ -106,28 +109,63 @@ class LocoAnalyzer:
             }
             tmp = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
             try:
-                tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                self.data_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
                 tmp.replace(self.data_file)
+                self._save_pending = False
             except OSError as exc:
                 print(f"[Analyzer] save failed: {exc}")
+
+    def _save_worker(self) -> None:
+        with self._lock:
+            self._save_timer = None
+            if not self._save_pending:
+                return
+        self._save_now()
+
+    def _save(self) -> None:
+        """Coalesce bursts of writes so hot event paths do not block on disk I/O."""
+        with self._lock:
+            self._save_pending = True
+            if self._save_timer is not None:
+                return
+            if self.save_delay <= 0:
+                timer = None
+            else:
+                timer = threading.Timer(self.save_delay, self._save_worker)
+                timer.daemon = True
+                self._save_timer = timer
+                timer.start()
+                return
+        self._save_now()
+
+    def flush(self) -> None:
+        """Synchronously persist pending state; useful before clean shutdown."""
+        with self._lock:
+            timer = self._save_timer
+            self._save_timer = None
+            self._save_pending = False
+            if timer is not None:
+                timer.cancel()
+        self._save_now()
 
     def _load(self) -> None:
         if not self.data_file.exists():
             return
         try:
             payload = json.loads(self.data_file.read_text(encoding="utf-8"))
-            self.events = [MemberEvent(**x) for x in payload.get("events", [])]
+            self.events = [MemberEvent(**x) for x in payload.get("events", [])][-self.max_events:]
             self.pending_leaves = {k: PendingLeave(**v) for k, v in payload.get("pending_leaves", {}).items()}
             self.reads = {
                 str(k): {str(uid): str(nick) for uid, nick in v.items()}
-                for k, v in payload.get("reads", {}).items() if isinstance(v, dict)
+                for k, v in list(payload.get("reads", {}).items())[-self.max_reads:] if isinstance(v, dict)
             }
             self.join_counts = {str(k): int(v) for k, v in payload.get("join_counts", {}).items()}
             self.online = {
                 str(k): {"user_id": str(v.get("user_id", "")), "nickname": str(v.get("nickname", ""))}
                 for k, v in payload.get("online", {}).items() if isinstance(v, dict)
             }
-            self.session_diagnostics = [SessionDiagnostic(**x) for x in payload.get("session_diagnostics", [])]
+            self.session_diagnostics = [SessionDiagnostic(**x) for x in payload.get("session_diagnostics", [])][-self.max_diagnostics:]
         except (OSError, ValueError, TypeError, KeyError):
             self.events, self.pending_leaves, self.reads = [], {}, {}
             self.join_counts, self.online, self.session_diagnostics = {}, {}, []
@@ -138,7 +176,6 @@ class LocoAnalyzer:
             del self.events[:-self.max_events]
 
     def authenticated_user(self, room_id: str, user_id: str, nickname: str, session_id: str) -> Dict[str, Any]:
-        """Record an identity only after the transport/auth adapter verified it."""
         room_id, user_id, nickname, session_id = map(str, (room_id, user_id, nickname, session_id))
         if not user_id or not session_id:
             raise ValueError("authenticated_user requires user_id and session_id")
@@ -156,8 +193,8 @@ class LocoAnalyzer:
             self.online[key] = {"user_id": user_id, "nickname": nickname}
             self.pending_leaves.pop(key, None)
             self._append_event(MemberEvent(room_id, user_id, nickname, "JOIN", self._now(), count, message_id))
-            self._save()
-            return count
+        self._save()
+        return count
 
     def user_left(self, room_id: str, user: object, message_id: Optional[str] = None) -> str:
         user_id, nickname = self._safe_user(user)
@@ -167,7 +204,7 @@ class LocoAnalyzer:
             self._append_event(MemberEvent(str(room_id), user_id, nickname, "LEAVE", left_at, 0, message_id))
             self.pending_leaves[key] = PendingLeave(str(room_id), user_id, nickname, left_at, message_id)
             self.online.pop(key, None)
-            self._save()
+        self._save()
         return self.leave_message(nickname, left_at)
 
     def record_read(self, message_id: str, user: object) -> None:
@@ -177,7 +214,7 @@ class LocoAnalyzer:
             bucket[user_id] = nickname
             while len(self.reads) > self.max_reads:
                 self.reads.pop(next(iter(self.reads)))
-            self._save()
+        self._save()
 
     def record_session_diagnostic(self, user_id: str, session_id: Optional[str], status: str,
                                   error_code: Optional[str] = None, detail: Optional[str] = None) -> None:
@@ -191,15 +228,14 @@ class LocoAnalyzer:
             self.session_diagnostics.append(diagnostic)
             if len(self.session_diagnostics) > self.max_diagnostics:
                 del self.session_diagnostics[:-self.max_diagnostics]
-            self._save()
+        self._save()
 
     def diagnose_999(self, user_id: str) -> Dict[str, Any]:
         with self._lock:
             matches = [x for x in self.session_diagnostics if x.user_id == str(user_id)]
             last = matches[-1] if matches else None
             return {
-                "user_id": str(user_id),
-                "observations": len(matches),
+                "user_id": str(user_id), "observations": len(matches),
                 "last_status": last.status if last else None,
                 "last_error_code": last.error_code if last else None,
                 "last_session_id": last.session_id if last else None,
@@ -235,8 +271,9 @@ class LocoAnalyzer:
         return {"ok": True, "action": "KICK_REQUEST", "room_id": target.room_id, "target_user_id": target.user_id, "target_nickname": target.nickname}
 
     def room_members(self, room_id: str) -> List[Dict[str, str]]:
+        prefix = f"{room_id}\x1f"
         with self._lock:
-            return [member for key, member in self.online.items() if key.startswith(f"{room_id}\x1f") and member]
+            return [member for key, member in self.online.items() if key.startswith(prefix) and member]
 
     def room_events(self, room_id: str, limit: int = 100) -> List[MemberEvent]:
         with self._lock:
@@ -247,10 +284,15 @@ class LocoAnalyzer:
 
     def stats(self, room_id: Optional[str] = None) -> Dict[str, int]:
         with self._lock:
-            events = self.events if room_id is None else [e for e in self.events if e.room_id == str(room_id)]
+            if room_id is None:
+                events = self.events
+                online_count = len(self.online)
+            else:
+                rid = str(room_id)
+                events = [e for e in self.events if e.room_id == rid]
+                online_count = sum(key.startswith(f"{rid}\x1f") for key in self.online)
             return {
                 "events": len(events), "joins": sum(e.event == "JOIN" for e in events),
                 "leaves": sum(e.event == "LEAVE" for e in events), "reads": len(self.reads),
-                "online": len(self.room_members(str(room_id))) if room_id is not None else len(self.online),
-                "diagnostics": len(self.session_diagnostics),
+                "online": online_count, "diagnostics": len(self.session_diagnostics),
             }
