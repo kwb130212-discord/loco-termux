@@ -33,21 +33,6 @@ def main() -> int:
     parser.add_argument("--session-file", default="~/.loco-termux/kakao-session.json")
     args = parser.parse_args()
 
-    if args.status:
-        try:
-            session = load_session(args.session_file)
-            if not session:
-                print(json.dumps({"ok": True, "authenticated": False, "reason": "no_session"}, ensure_ascii=False))
-                return 0
-            if args.client_id and session.needs_refresh() and session.refresh_token:
-                session = refresh_session(args.client_id, args.client_secret, session)
-                save_session(session, args.session_file)
-            validate_session(session)
-            print(json.dumps({"ok": True, "authenticated": True, "user_id": session.user_id, "nickname": session.nickname, "session": session.public()}, ensure_ascii=False))
-            return 0
-        except KakaoOAuthError as exc:
-            print(json.dumps({"ok": True, "authenticated": False, "reason": str(exc)}, ensure_ascii=False)); return 0
-
     if args.logout:
         try:
             session = load_session(args.session_file)
@@ -58,6 +43,27 @@ def main() -> int:
             return 0
         except KakaoOAuthError as exc:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)); return 1
+
+    if args.status:
+        session = load_session(args.session_file)
+        if not session:
+            print(json.dumps({"ok": False, "authenticated": False, "reason": "no_saved_session"}, ensure_ascii=False)); return 0
+        try:
+            # Fast path: an unexpired locally stored access token is enough to
+            # restore the UI immediately. Full API validation is only needed
+            # after expiry; the normal login path still validates when needed.
+            if not session.needs_refresh():
+                print(json.dumps({"ok": True, "authenticated": True, "user_id": session.user_id, "nickname": session.nickname, "expires_at": session.access_expires_at()}, ensure_ascii=False))
+                return 0
+            if not args.client_id or not session.refresh_token:
+                print(json.dumps({"ok": False, "authenticated": False, "reason": "session_expired"}, ensure_ascii=False)); return 0
+            session = refresh_session(args.client_id, args.client_secret, session)
+            save_session(session, args.session_file)
+            validate_session(session)
+            print(json.dumps({"ok": True, "authenticated": True, "user_id": session.user_id, "nickname": session.nickname, "expires_at": session.access_expires_at(), "refreshed": True}, ensure_ascii=False))
+            return 0
+        except KakaoOAuthError as exc:
+            print(json.dumps({"ok": False, "authenticated": False, "reason": str(exc)}, ensure_ascii=False)); return 0
 
     if not args.oauth_login:
         print(json.dumps({"ok": False, "error": "oauth_login_required"}, ensure_ascii=False)); return 2
