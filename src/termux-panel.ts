@@ -160,23 +160,18 @@ async function main() {
     try {
       await mainMenu();
       const c = await ask('\nLOCO > ');
-      if (c === '0' || c.toLowerCase() === 'exit') return;
-      if (c === '1') { const ok = await loginMenu(); if (ok) startRuntime(); }
-      else if (c === '2') await roomList(); else if (c === '3') await roomAdd(); else if (c === '4') await roomToggle(true); else if (c === '5') await roomToggle(false); else if (c === '6') await roomRemove(); else if (c === '7') await members(); else if (c === '8') await readers(); else if (c === '9') await exportData(false); else if (c === '10') await exportData(true);
-      else if (c === '11') { clear(); title('SERVICE CENTER  /  OpenChat 시작'); startRuntime(); await pause(); }
-      else if (c === '12') { clear(); title('SERVICE CENTER  /  OpenChat 정지'); stopRuntime(); await pause(); }
-      else if (c === '13') { clear(); title('SERVICE CENTER  /  OpenChat 재시작'); restartRuntime(); await pause(); }
-      else if (c === '14') { clear(); title('SERVICE CENTER  /  OpenChat 상태'); runtimeInfo(); await pause(); }
-      else if (c === '15') await showLog();
-      else if (c === '16') { clear(); title('LOCO BRIDGE  /  기존 패널'); await launchInteractive('node', ['dist/bridge-main.js']); await pause(); }
-    } catch (error) {
-      if (isReturnToPanel(error)) {
-        clear();
-        console.log(`${C.green}✓ 00 → 메인 CONTROL CENTER로 즉시 복귀했습니다.${C.reset}`);
-        continue;
+      if (c === '0' || c.toLowerCase() === 'exit') {
+        console.log(`${C.cyan}\n■ 0 입력 → LOCO-Termux 패널을 종료합니다.${C.reset}`);
+        console.log(`${C.dim}OpenChat 런타임은 계속 실행됩니다.${C.reset}`);
+        setTimeout(() => process.exit(0), 50).unref();
+        return;
       }
-      console.error(`${C.red}패널 오류: ${error instanceof Error ? error.stack || error.message : String(error)}${C.reset}`);
-      await pause();
+      if (c === '1') { const ok = await loginMenu(); if (ok) startRuntime(); }
+      else if (c === '2') await roomList(); else if (c === '3') await roomAdd(); else if (c === '4') await roomToggle(true); else if (c === '5') await roomToggle(false); else if (c === '6') await roomRemove(); else if (c === '7') await members(); else if (c === '8') await readers(); else if (c === '9') await exportData(false); else if (c === '10') await exportData(true); else if (c === '11') startRuntime(); else if (c === '12') stopRuntime(); else if (c === '13') restartRuntime(); else if (c === '14') { clear(); title('SERVICE CENTER  /  OpenChat 상태'); runtimeInfo(); await pause(); } else if (c === '15') await showLog(); else if (c === '16') { await launchInteractive('node', ['dist/bridge-main.js']); } else console.log(`${C.yellow}알 수 없는 메뉴입니다.${C.reset}`);
+    } catch (error) {
+      if (isReturnToPanel(error)) continue;
+      console.error(`${C.red}[PANEL ERROR] ${error instanceof Error ? error.message : String(error)}${C.reset}`);
+      await pause().catch(() => undefined);
     }
   }
 }
