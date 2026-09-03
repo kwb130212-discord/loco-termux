@@ -1,10 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # LOCO-Termux self-healing launcher
-# - rebuilds automatically when source/config changes
-# - repairs npm dependencies
+# - bootstraps required tools
+# - repairs dependencies when lock/node_modules drift
+# - rebuilds stale TypeScript output
 # - keeps Termux awake when supported
-# - restarts the control center after crashes or unexpected exits
+# - restarts the control center after failures
 # - retries preparation failures indefinitely while Termux is alive
 
 cd "$(dirname "$0")" || exit 1
@@ -15,8 +16,6 @@ export NODE_OPTIONS="${NODE_OPTIONS:-}"
 
 log() { echo "[LOCO] $*"; }
 
-# Termux can suspend background processes aggressively while the screen is off.
-# wake-lock is best-effort: the bot still works when the command is unavailable.
 WAKE_LOCK=0
 acquire_wake_lock() {
   if command -v termux-wake-lock >/dev/null 2>&1; then
@@ -32,41 +31,32 @@ release_wake_lock() {
 }
 
 bootstrap_tools() {
-  if ! command -v pkg >/dev/null 2>&1; then
-    log "Termux 환경이 아닙니다. 이 스크립트는 Termux에서 실행하세요."
-    return 1
-  fi
+  command -v pkg >/dev/null 2>&1 || { log "Termux에서 실행하세요."; return 1; }
 
-  if ! command -v node >/dev/null 2>&1; then
-    log "Node.js 없음 → 설치 시도"
-    pkg install -y nodejs || return 1
-  fi
-
-  if ! command -v npm >/dev/null 2>&1; then
-    log "npm 없음 → Node.js 재설치 시도"
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    log "Node.js/npm 없음 → 설치/복구"
     pkg install -y nodejs || return 1
   fi
 
   if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
-    log "Python 없음 → 설치 시도"
+    log "Python 없음 → 설치"
     pkg install -y python || return 1
   fi
-
   return 0
 }
 
 prepare() {
   bootstrap_tools || return 1
 
+  # package-lock and node_modules must agree before building/running.
   if [ ! -f package-lock.json ] || [ ! -d node_modules ]; then
     log "의존성 설치/복구 중..."
     npm install || return 1
-  elif [ ! -f node_modules/.package-lock.json ]; then
-    log "node_modules 상태 확인/복구 중..."
+  elif [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+    log "의존성 잠금 상태 변경 감지 → npm install"
     npm install || return 1
   fi
 
-  # Always use a build that is at least as new as the source/configuration.
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
     rebuild=1
@@ -85,21 +75,18 @@ prepare() {
     npm run build || return 1
   fi
 
-  [ -f dist/termux-panel.js ] || return 1
+  [ -f dist/termux-panel.js ] || { log "dist/termux-panel.js 생성 실패"; return 1; }
   return 0
 }
 
-cleanup() {
-  release_wake_lock
-}
-trap 'cleanup; log "종료 신호 수신 — 정리 후 종료"; exit 0' INT TERM EXIT
+cleanup() { release_wake_lock; }
+trap 'cleanup; log "종료 신호 수신 — 종료"; exit 0' INT TERM EXIT
 
 acquire_wake_lock
 
-# Keep the supervisor alive. Only an explicit SIGINT/SIGTERM exits it.
 while true; do
   if ! prepare; then
-    log "준비 단계 실패 — 5초 후 다시 시도"
+    log "준비 단계 실패 — 5초 후 재시도"
     sleep 5
     continue
   fi
@@ -107,8 +94,6 @@ while true; do
   log "LOCO-Termux Control Center 시작..."
   node dist/termux-panel.js
   code=$?
-
-  # Any unexpected runtime failure is treated as recoverable.
   log "Control Center 종료(code=$code) — 2초 후 자동 재시작"
   sleep 2
 done
