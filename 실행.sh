@@ -7,12 +7,17 @@
 # - keeps Termux awake when supported
 # - restarts the control center after failures
 # - retries preparation failures indefinitely while Termux is alive
+# - uses warn-mode unhandled rejection handling; the supervisor is the final recovery layer
 
 cd "$(dirname "$0")" || exit 1
 
 export PYTHONIOENCODING="utf-8"
 export PYTHONUNBUFFERED="1"
-export NODE_OPTIONS="${NODE_OPTIONS:-}"
+# Do not let an unhandled Promise rejection terminate Node before the application guard can log it.
+case " ${NODE_OPTIONS:-} " in
+  *" --unhandled-rejections="*) ;;
+  *) export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--unhandled-rejections=warn" ;;
+esac
 
 log() { echo "[LOCO] $*"; }
 
@@ -84,6 +89,8 @@ trap 'cleanup; log "종료 신호 수신 — 종료"; exit 0' INT TERM EXIT
 
 acquire_wake_lock
 
+# Outer supervisor: application crash, fatal library error, or unexpected exit
+# never becomes a permanent stop while this shell/Termux process is alive.
 while true; do
   if ! prepare; then
     log "준비 단계 실패 — 5초 후 재시도"
