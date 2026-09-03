@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createAuthByQR } from 'kakaoforge';
+import { createAuthByQR } from './kakaoforge-loader';
 
 const DATA_DIR = join(homedir(), '.loco-termux');
 const AUTH_PATH = join(DATA_DIR, 'kakaoforge-auth.json');
