@@ -77,13 +77,7 @@ async function exportData(departed = false) {
   await pause();
 }
 
-/**
- * Run a child process in the foreground.
- * The previous implementation used spawn() and immediately returned to the
- * parent menu. That left both the parent readline and the child process
- * competing for Termux stdin, which could make QR login appear to hang or
- * disappear. Login/runtime commands must own stdin exclusively until exit.
- */
+/** Keep child processes exclusive ownership of Termux stdin. */
 async function launch(command: string, args: string[] = []) {
   console.log(`${C.green}▶ ${command} ${args.join(' ')} 실행${C.reset}`);
   const result = spawnSync(command, args, {
@@ -91,19 +85,19 @@ async function launch(command: string, args: string[] = []) {
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
   });
   if (result.error) console.error(`${C.red}${result.error.message}${C.reset}`);
-  if (result.status !== 0 && result.status !== null) {
-    console.error(`${C.red}프로세스 종료 코드: ${result.status}${C.reset}`);
-  }
+  if (result.status !== 0 && result.status !== null) console.error(`${C.red}프로세스 종료 코드: ${result.status}${C.reset}`);
 }
 
-async function loginMenu() {
-  clear(); title('AUTH CENTER  /  로그인');
+async function loginMenu(): Promise<boolean> {
+  clear(); title('AUTH CENTER  /  LOGIN FIRST');
+  console.log(`${C.green}●${C.reset} 로그인 완료 후 나머지 기능을 사용하는 것을 권장합니다.\n`);
   console.log('1. QR 로그인  (기존 QR 로그인 경로 그대로 실행)');
   console.log('2. 기존 로그인/상태 패널 열기');
   console.log('3. 돌아가기');
-  const c = await ask('선택 > ');
-  if (c === '1') { await launch('npm', ['run', 'login:qr']); await pause(); }
-  else if (c === '2') { await launch('node', ['dist/bridge-main.js']); await pause(); }
+  const c = await ask('로그인 > ');
+  if (c === '1') { await launch('npm', ['run', 'login:qr']); await pause(); return true; }
+  if (c === '2') { await launch('node', ['dist/bridge-main.js']); await pause(); return true; }
+  return false;
 }
 
 async function mainMenu() {
@@ -127,10 +121,14 @@ async function mainMenu() {
   console.log(' 11. OpenChat 봇 실행');
   console.log(' 12. 기존 LOCO 브리지 패널 실행');
   console.log('  0. 종료');
-  console.log(`${C.dim}\nTip: 방 등록/해제는 여기서 관리하고, 실제 !kick·!관리자·!입장로그 등의 명령은 OpenChat 런타임에서 처리됩니다.${C.reset}`);
+  console.log(`${C.dim}\nTip: 기존 OpenChat 명령어(!kick·!관리자·!입장로그 등)는 수정하지 않고 그대로 런타임에서 처리됩니다.${C.reset}`);
 }
 
 async function main() {
+  // Authentication is the first screen on every fresh panel start.
+  // Existing command/runtime implementations are intentionally untouched.
+  await loginMenu();
+
   while (true) {
     await mainMenu();
     const c = await ask('\nLOCO > ');
