@@ -2,7 +2,7 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { createAuthByQR, createClient, type AuthPayload } from 'kakaoforge';
+import { createAuthByQR, createClient, type AuthPayload } from './kakaoforge-loader';
 import qrcode from 'qrcode-terminal';
 
 const DATA_DIR = join(homedir(), '.loco-termux');
@@ -52,8 +52,8 @@ export async function loginLocoByQR(options: {
   header();
   const uuid = options.deviceUuid || deviceUuid();
 
-  status('AUTHENTICATION', 'KakaoForge의 공식 QR 인증 흐름을 시작합니다.', T.blue);
-  console.log(`${T.dim}• OAuth REST 로그인/비밀번호 입력 없음${T.reset}`);
+  status('AUTHENTICATION', 'KakaoForge의 정상 QR 인증 흐름을 시작합니다.', T.blue);
+  console.log(`${T.dim}• 비밀번호를 수집하거나 인증을 우회하지 않습니다.${T.reset}`);
   console.log(`${T.dim}• KakaoTalk 앱에서 직접 QR 승인${T.reset}`);
   console.log('');
 
@@ -79,7 +79,7 @@ export async function loginLocoByQR(options: {
   });
 
   if (!payload.userId || !payload.accessToken || !payload.deviceUuid) {
-    throw new Error('KakaoForge QR 인증 결과에 필수 인증 정보가 없습니다.');
+    throw new Error('QR 인증 결과에 필수 인증 정보가 없습니다.');
   }
 
   status('LOGIN SUCCESS', `userId=${payload.userId}`, T.green);
