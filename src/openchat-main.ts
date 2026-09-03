@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomInt } from 'node:crypto';
-import { createClient, MemberType, type MessageEvent, type MemberEvent, type KakaoForgeClient } from 'kakaoforge';
+import { createClient as createForgeClient, getKakaoForge } from './kakaoforge-loader';
+import type { MessageEvent, MemberEvent, KakaoForgeClient } from 'kakaoforge';
 
 type State = Record<string, any>;
 type EventKind = 'JOIN' | 'LEAVE' | 'KICK';
@@ -63,7 +64,8 @@ function userIdOf(message: MessageEvent): string {
 }
 
 function isRoomManager(message: MessageEvent): boolean {
-  return message.sender.type === MemberType.OpenChat.Owner || message.sender.type === MemberType.OpenChat.Manager;
+  const MemberType = (getKakaoForge() as any).MemberType;
+  return message.sender.type === MemberType?.OpenChat?.Owner || message.sender.type === MemberType?.OpenChat?.Manager;
 }
 
 function developerId(client: KakaoForgeClient): string {
@@ -168,15 +170,7 @@ function targetFromReply(message: MessageEvent): { id: string; name: string } | 
 function replyTextCandidates(message: MessageEvent): string[] {
   const reply = findReply(message);
   if (!reply) return [];
-  const values = [
-    reply?.text,
-    reply?.message?.text,
-    reply?.content,
-    reply?.body,
-    reply?.quote?.text,
-    reply?.message?.message?.text,
-    reply?.replyTo?.text,
-  ];
+  const values = [reply?.text, reply?.message?.text, reply?.content, reply?.body, reply?.quote?.text, reply?.message?.message?.text, reply?.replyTo?.text];
   return values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
 }
 
@@ -184,7 +178,6 @@ function targetFromLeaveLogReply(message: MessageEvent): { id: string; name: str
   const roomId = String(message.room.id);
   const candidates = replyTextCandidates(message);
   if (!candidates.length) return null;
-
   const rows = memberRows(roomId, 'LEAVE').reverse();
   for (const text of candidates) {
     const idMatch = text.match(/(?:퇴장로그|퇴장|나감)[^\d]{0,120}(\d{3,})/i);
@@ -193,7 +186,6 @@ function targetFromLeaveLogReply(message: MessageEvent): { id: string; name: str
       const row = rows.find((item) => String(item.userId) === id);
       if (row) return { id: String(row.userId), name: String(row.nickname || '') };
     }
-
     const row = rows.find((item) => {
       const name = String(item.nickname || '').trim();
       return name && text.includes(name);
@@ -280,7 +272,6 @@ async function kick(chat: any, roomId: string, target: { id: string; name: strin
 async function handleCommand(client: KakaoForgeClient, chat: any, message: MessageEvent): Promise<void> {
   const value = textOf(message);
   if (!value.startsWith('!') || String(message.sender.id) === String(client.userId)) return;
-
   const roomId = String(message.room.id);
   const uid = userIdOf(message);
   const state = commandState();
@@ -291,14 +282,10 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
   const reply = (content: string) => send(chat, message.room.id, content);
   const [command, ...args] = value.split(/\s+/);
   const admin = isAdmin(client, message, room);
-
   switch (command.toLowerCase()) {
-    case '!명령어':
-      return reply(help());
-    case '!핑':
-      return reply('🏓 pong!');
-    case '!봇정보':
-      return reply(`🤖 LOCO-Termux\n방: ${message.room.name}\n전송계층: ${client.constructor.name}\n연결: ${client.connected ? 'YES' : 'NO'}\n관리자: ${Object.keys(room.admins).length}명`);
+    case '!명령어': return reply(help());
+    case '!핑': return reply('🏓 pong!');
+    case '!봇정보': return reply(`🤖 LOCO-Termux\n방: ${message.room.name}\n전송계층: ${client.constructor.name}\n연결: ${client.connected ? 'YES' : 'NO'}\n관리자: ${Object.keys(room.admins).length}명`);
     case '!관리자':
     case '!관리자해제': {
       if (!isRoomManager(message) && uid !== developerId(client)) return reply('❌ 실제 오픈채팅 방장/부방장만 사용할 수 있습니다.');
@@ -363,14 +350,11 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
     }
     case '!방등록해제':
       if (uid !== developerId(client)) return reply('🔒 개발자 전용 명령어입니다.');
-      room.registered = false;
-      room.code = null;
-      room.codeExpiresAt = 0;
-      save(CMD, state);
+      room.registered = false; room.code = null; room.codeExpiresAt = 0; save(CMD, state);
       return reply('✅ 현재 방 등록을 해제했습니다.');
     case '!도박가입':
-      if (!room.users[uid].joined) room.users[uid].joined = true;
-      if (!room.users[uid].points) room.users[uid].points = 1000;
+      if (room.users[uid].joined !== true) room.users[uid].joined = true;
+      if (room.users[uid].points === undefined || room.users[uid].points === null) room.users[uid].points = 1000;
       save(CMD, state);
       return reply(`🎰 가입 완료! 보유 포인트: ${room.users[uid].points}`);
     case '!도박': {
@@ -383,27 +367,21 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
       save(CMD, state);
       return reply(win ? `🎉 당첨! +${bet * 3}P\n잔액: ${room.users[uid].points}P` : `💥 실패! -${bet}P\n잔액: ${room.users[uid].points}P`);
     }
-    case '!봇상태':
-      return reply(`🤖 ${client.connected ? '🟢 연결됨' : '🔴 연결 끊김'}\nuserId: ${client.userId}\n방: ${message.room.name}`);
-    default:
-      return;
+    case '!봇상태': return reply(`🤖 ${client.connected ? '🟢 연결됨' : '🔴 연결 끊김'}\nuserId: ${client.userId}\n방: ${message.room.name}`);
+    default: return;
   }
 }
 
 async function sendLeaveLogs(chat: any, event: MemberEvent, rows: State[]): Promise<void> {
   for (const row of rows) {
-    try {
-      await send(chat, event.room.id, `📤 퇴장로그\n${row.nickname} (${row.userId})\n${fmt(row.at)}\n↩️ 이 메시지에 답장 후 !kick`);
-    } catch (error) {
-      console.error('[KakaoForge][leave-log]', error instanceof Error ? error.message : String(error));
-    }
+    try { await send(chat, event.room.id, `📤 퇴장로그\n${row.nickname} (${row.userId})\n${fmt(row.at)}\n↩️ 이 메시지에 답장 후 !kick`); }
+    catch (error) { console.error('[KakaoForge][leave-log]', error instanceof Error ? error.message : String(error)); }
   }
 }
 
 async function main(): Promise<void> {
   if (!existsSync(AUTH)) throw new Error(`QR 로그인이 필요합니다: ${AUTH}`);
-
-  const client = createClient({
+  const client = createForgeClient({
     authPath: AUTH,
     autoConnect: true,
     autoReconnect: true,
@@ -411,15 +389,13 @@ async function main(): Promise<void> {
     sendIntervalMs: 400,
     pingIntervalMs: 60_000,
     socketKeepAliveMs: 30_000,
-  });
-
-  client.onReady((chat) => {
+  }) as KakaoForgeClient;
+  client.onReady((chat: any) => {
     console.log(`[KakaoForge] READY userId=${client.userId}`);
     console.log(`[KakaoForge] transport=${client.type} openChatOnly=true`);
     void chat;
   });
-
-  client.onMessage(async (chat, message) => {
+  client.onMessage(async (chat: any, message: MessageEvent) => {
     const state = commandState();
     const room = roomState(state, String(message.room.id));
     recordMessage(room, message);
@@ -429,27 +405,14 @@ async function main(): Promise<void> {
     save(CMD, state);
     try { await handleCommand(client, chat, message); } catch (error) { console.error('[KakaoForge][command]', error); }
   });
-
-  client.onJoin((_chat, event) => {
-    recordMemberEvent('JOIN', event);
-  });
-
-  client.onLeave(async (chat, event) => {
+  client.onJoin((_chat: any, event: MemberEvent) => { recordMemberEvent('JOIN', event); });
+  client.onLeave(async (chat: any, event: MemberEvent) => {
     const rows = recordMemberEvent('LEAVE', event);
     if (rows.length) await sendLeaveLogs(chat, event, rows);
   });
-
-  client.onKick((_chat, event) => {
-    recordMemberEvent('KICK', event);
-  });
-
-  client.on('error', (error) => {
-    console.error('[KakaoForge][error]', error instanceof Error ? error.stack || error.message : String(error));
-  });
-
-  const shutdown = (): void => {
-    try { client.disconnect?.(); } catch {}
-  };
+  client.onKick((_chat: any, event: MemberEvent) => { recordMemberEvent('KICK', event); });
+  client.on('error', (error: unknown) => { console.error('[KakaoForge][error]', error instanceof Error ? error.stack || error.message : String(error)); });
+  const shutdown = (): void => { try { client.disconnect?.(); } catch {} };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }
