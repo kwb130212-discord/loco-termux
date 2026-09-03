@@ -7,7 +7,10 @@ import type { AuthPayload } from './kakaoforge-loader';
 import qrcode from 'qrcode-terminal';
 
 const DATA_DIR = join(homedir(), '.loco-termux');
-const AUTH_PATH = join(DATA_DIR, 'auth.json');
+// Use the same persistent auth file as the OpenChat runtime.
+// Keeping these paths identical prevents a successful QR login from appearing
+// to be lost when the QR helper process exits.
+const AUTH_PATH = join(DATA_DIR, 'kakaoforge-auth.json');
 
 export type LocoQrLoginResult = AuthPayload & { client: any };
 
@@ -80,8 +83,6 @@ export async function loginLocoByQR(options: {
       console.log('');
       console.log(`${T.yellow}${T.bold}                 ▼ QR CODE ▼${T.reset}`);
       console.log('');
-      // qrcode-terminal's small=false is very large on narrow Termux screens.
-      // Use compact mode so the QR remains scannable without dominating the panel.
       qrcode.generate(url, { small: true });
       console.log('');
       console.log(`${T.dim}QR content:${T.reset} ${url}`);
@@ -125,10 +126,11 @@ async function main(): Promise<void> {
   try {
     const result = await loginLocoByQR();
     console.log(`${T.cyan}${T.bold}╭${line()}╮${T.reset}`);
-    console.log(`${T.cyan}${T.bold}│${T.reset} ${T.green}${T.bold}READY${T.reset}  LOCO 클라이언트 연결을 시작했습니다.`.padEnd(61) + `${T.cyan}${T.bold}│${T.reset}`);
+    console.log(`${T.cyan}${T.bold}│${T.reset} ${T.green}${T.bold}READY${T.reset}  LOCO 인증 저장 완료. 런타임에서 연결하세요.`.padEnd(61) + `${T.cyan}${T.bold}│${T.reset}`);
     console.log(`${T.cyan}${T.bold}╰${line()}╯${T.reset}`);
-    console.log(`${T.dim}인증 파일:${T.reset} ~/.loco-termux/auth.json`);
+    console.log(`${T.dim}인증 파일:${T.reset} ~/.loco-termux/kakaoforge-auth.json`);
     console.log(`${T.dim}userId:${T.reset} ${result.userId}`);
+    console.log(`${T.green}✓ 다음 단계: OpenChat 런타임이 저장된 세션으로 연결됩니다.${T.reset}`);
     console.log('');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
