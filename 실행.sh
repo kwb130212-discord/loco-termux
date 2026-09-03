@@ -1,10 +1,11 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # LOCO-Termux self-healing launcher
-# - always rebuilds when TypeScript sources are newer than dist
-# - repairs npm dependencies when needed
-# - restarts the control center after crashes/clean exits
-# - keeps retrying preparation failures while Termux is alive
+# - rebuilds automatically when source/config changes
+# - repairs npm dependencies
+# - keeps Termux awake when supported
+# - restarts the control center after crashes or unexpected exits
+# - retries preparation failures indefinitely while Termux is alive
 
 cd "$(dirname "$0")" || exit 1
 
@@ -13,6 +14,22 @@ export PYTHONUNBUFFERED="1"
 export NODE_OPTIONS="${NODE_OPTIONS:-}"
 
 log() { echo "[LOCO] $*"; }
+
+# Termux can suspend background processes aggressively while the screen is off.
+# wake-lock is best-effort: the bot still works when the command is unavailable.
+WAKE_LOCK=0
+acquire_wake_lock() {
+  if command -v termux-wake-lock >/dev/null 2>&1; then
+    termux-wake-lock >/dev/null 2>&1 || true
+    WAKE_LOCK=1
+    log "Termux wake-lock 활성화"
+  fi
+}
+release_wake_lock() {
+  if [ "$WAKE_LOCK" -eq 1 ] && command -v termux-wake-unlock >/dev/null 2>&1; then
+    termux-wake-unlock >/dev/null 2>&1 || true
+  fi
+}
 
 bootstrap_tools() {
   if ! command -v pkg >/dev/null 2>&1; then
@@ -49,8 +66,7 @@ prepare() {
     npm install || return 1
   fi
 
-  # 소스가 dist보다 새로우면 반드시 재빌드합니다.
-  # 이전에는 dist가 존재하기만 하면 오래된 빌드를 실행할 수 있었습니다.
+  # Always use a build that is at least as new as the source/configuration.
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
     rebuild=1
@@ -58,12 +74,14 @@ prepare() {
     rebuild=1
   elif [ -f package.json ] && [ package.json -nt dist/termux-panel.js ]; then
     rebuild=1
+  elif [ -f package-lock.json ] && [ package-lock.json -nt dist/termux-panel.js ]; then
+    rebuild=1
   elif [ -f tsconfig.json ] && [ tsconfig.json -nt dist/termux-panel.js ]; then
     rebuild=1
   fi
 
   if [ "$rebuild" -eq 1 ]; then
-    log "최신 소스 감지 → TypeScript 전체 빌드"
+    log "최신 소스/설정 감지 → TypeScript 전체 빌드"
     npm run build || return 1
   fi
 
@@ -71,8 +89,14 @@ prepare() {
   return 0
 }
 
-trap 'log "종료 신호 수신 — 정리 후 종료"; exit 0' INT TERM
+cleanup() {
+  release_wake_lock
+}
+trap 'cleanup; log "종료 신호 수신 — 정리 후 종료"; exit 0' INT TERM EXIT
 
+acquire_wake_lock
+
+# Keep the supervisor alive. Only an explicit SIGINT/SIGTERM exits it.
 while true; do
   if ! prepare; then
     log "준비 단계 실패 — 5초 후 다시 시도"
@@ -84,6 +108,7 @@ while true; do
   node dist/termux-panel.js
   code=$?
 
+  # Any unexpected runtime failure is treated as recoverable.
   log "Control Center 종료(code=$code) — 2초 후 자동 재시작"
   sleep 2
 done
