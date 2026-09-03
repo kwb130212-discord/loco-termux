@@ -41,13 +41,50 @@ function resolvePackageRoot(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new Error(
-    'KakaoForge is not installed. Run "npm install" in loco-termux and retry.'
-  );
+  throw new Error('KakaoForge is not installed. Run "npm install" and retry.');
+}
+
+function buildKakaoForge(packageRoot: string): void {
+  const distEntry = join(packageRoot, 'dist', 'index.js');
+  if (existsSync(distEntry)) return;
+
+  console.log('[KakaoForge] dist/index.js is missing. Building the pinned source checkout...');
+
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const env = {
+    ...process.env,
+    npm_config_fund: 'false',
+    npm_config_audit: 'false',
+  };
+
+  // Do not invoke the root postinstall recursively. Install only KakaoForge's
+  // own dependencies, then compile its checked-out TypeScript source.
+  const install = spawnSync(npm, ['install', '--include=dev', '--ignore-scripts'], {
+    cwd: packageRoot,
+    stdio: 'inherit',
+    env,
+  });
+  if (install.status !== 0) {
+    throw new Error(`KakaoForge dependency installation failed (exit ${install.status ?? 1}).`);
+  }
+
+  const build = spawnSync(npm, ['run', 'build'], {
+    cwd: packageRoot,
+    stdio: 'inherit',
+    env,
+  });
+  if (build.status !== 0) {
+    throw new Error(`KakaoForge source build failed (exit ${build.status ?? 1}).`);
+  }
+
+  if (!existsSync(distEntry)) {
+    throw new Error('KakaoForge build finished but dist/index.js was not produced.');
+  }
 }
 
 function loadModule(): KakaoForgeModule {
   const packageRoot = resolvePackageRoot();
+  buildKakaoForge(packageRoot);
   const require = createRequire(join(packageRoot, 'package.json'));
   return require(packageRoot) as KakaoForgeModule;
 }
@@ -65,19 +102,6 @@ export function createClient(config?: Record<string, unknown>): any {
 }
 
 export function ensureKakaoForgeInstalled(): void {
-  try {
-    resolvePackageRoot();
-    return;
-  } catch {
-    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const result = spawnSync(npm, ['install'], {
-      cwd: process.cwd(),
-      stdio: 'inherit',
-      env: { ...process.env, npm_config_fund: 'false', npm_config_audit: 'false' },
-    });
-    if (result.status !== 0) {
-      throw new Error(`npm install failed with exit code ${result.status ?? 1}`);
-    }
-  }
-  resolvePackageRoot();
+  const packageRoot = resolvePackageRoot();
+  buildKakaoForge(packageRoot);
 }
