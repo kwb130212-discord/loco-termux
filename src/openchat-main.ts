@@ -4,671 +4,100 @@ import { join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { createClient } from './kakaoforge-loader';
 
-type AnyMap = Record<string, any>;
+type M = Record<string, any>;
 type EventKind = 'JOIN' | 'LEAVE' | 'KICK';
 
-const DATA_DIR = join(homedir(), '.loco-termux');
-const AUTH_PATH = join(DATA_DIR, 'kakaoforge-auth.json');
-const STATE_PATH = join(DATA_DIR, 'loco-transport.json');
-const COMMAND_STATE_PATH = join(DATA_DIR, 'command-state.json');
-const DEVELOPER_ID_PATH = join(DATA_DIR, 'developer-id');
-const ROOM_VERIFY_TTL = 5 * 60 * 1000;
+const DIR = join(homedir(), '.loco-termux');
+const AUTH = join(DIR, 'kakaoforge-auth.json');
+const STATE = join(DIR, 'loco-transport.json');
+const CMD = join(DIR, 'command-state.json');
+const DEV = join(DIR, 'developer-id');
+const CODE_TTL = 300000;
 const MAX_EVENTS = 5000;
-const MAX_MESSAGES_PER_ROOM = 2000;
-const ROOM_SYNC_MS = 30_000;
-const HEARTBEAT_MS = 10_000;
+const MAX_MESSAGES = 2000;
+const SYNC = 30000;
+const HEARTBEAT = 10000;
+const OWNER = String(process.env.LOCO_DEVELOPER_ID || '').trim();
 
-mkdirSync(DATA_DIR, { recursive: true });
+mkdirSync(DIR, { recursive: true });
+const load = (p: string): M => { try { const v = JSON.parse(readFileSync(p, 'utf8')); return v && typeof v === 'object' ? v : {}; } catch { return {}; } };
+const save = (p: string, v: unknown) => writeFileSync(p, JSON.stringify(v, null, 2), 'utf8');
+const state = () => load(CMD);
+const room = (s: M, id: string): M => { s.rooms ??= {}; s.rooms[id] ??= { registered: false, code: null, codeExpiresAt: 0, registeredAt: null, users: {}, admins: {}, readers: {}, messages: {} }; const r = s.rooms[id]; r.users ??= {}; r.admins ??= {}; r.readers ??= {}; r.messages ??= {}; return r; };
+const text = (m: any) => String(m?.message?.text ?? m?.text ?? '').trim();
+const roomId = (c: any, m?: any) => String(m?.room?.id ?? m?.chatId ?? c?.id ?? c?.chatId ?? '');
+const roomName = (c: any, m?: any) => String(m?.room?.name ?? c?.name ?? c?.roomName ?? c?.title ?? '');
+const sender = (m: any) => m?.sender ?? m?.member ?? m?.author ?? {};
+const senderId = (m: any) => String(sender(m)?.id ?? sender(m)?.userId ?? sender(m)?.memberId ?? m?.senderId ?? m?.userId ?? '').trim();
+const senderName = (m: any) => String(sender(m)?.name ?? sender(m)?.nickname ?? sender(m)?.nickName ?? m?.senderName ?? '').trim();
+const chunks = (s: string, n = 1800) => { const a: string[] = []; for (let i = 0; i < s.length; i += n) a.push(s.slice(i, i + n)); return a.length ? a : ['']; };
+const manager = (m: any) => { const s = sender(m); const v = [s?.isManager, s?.isAdmin, s?.isHost, s?.isOwner, s?.isRoomAdmin, s?.isModerator, s?.role, s?.type, s?.memberType, s?.privilege, s?.authority, s?.status]; return v.some(x => x === true) || v.map(x => String(x ?? '').toUpperCase()).some(x => ['ADMIN','MANAGER','HOST','OWNER','MODERATOR','LEADER','부방장','방장','관리자'].includes(x)); };
+const developerId = (client: any) => { if (OWNER) return OWNER; try { const v = readFileSync(DEV, 'utf8').trim(); if (v) return v; } catch {} const id = String(client?.userId ?? '').trim(); if (id) try { writeFileSync(DEV, id, 'utf8'); } catch {} return id; };
+const admin = (client: any, m: any, r: M, id: string) => id === developerId(client) || manager(m) || Boolean(r.admins?.[id]);
+const mentions = (m: any): any[] => [m?.message?.mentions,m?.message?.mention,m?.mentions,m?.mention,m?.message?.meta?.mentions,m?.message?.metadata?.mentions].flatMap(v => Array.isArray(v) ? v : v ? [v] : []);
+const mentionTarget = (m: any) => { for (const x of mentions(m)) { const id = x?.userId ?? x?.id ?? x?.memberId ?? x?.user?.id; if (id != null) return { id: String(id), name: String(x?.name ?? x?.nickname ?? x?.user?.name ?? x?.user?.nickname ?? '') }; } return null; };
+const reply = (m: any) => m?.replyTo ?? m?.reply ?? m?.message?.replyTo ?? m?.message?.reply ?? m?.message?.quote ?? m?.quote ?? m?.message?.metadata?.reply ?? null;
+const replyTarget = (m: any) => { const r = reply(m); const id = r?.userId ?? r?.memberId ?? r?.sender?.id ?? r?.author?.id; return id == null ? null : { id: String(id), name: String(r?.nickname ?? r?.name ?? r?.sender?.name ?? r?.author?.name ?? '') }; };
+const fmt = (v: any) => { const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v ?? '') : d.toLocaleString('ko-KR', { hour12: false }); };
+const events = (type: string, id: string) => { const h = load(STATE).memberEvents; return (Array.isArray(h) ? h : []).filter((x: M) => (!type || x.type === type) && String(x.roomId) === id); };
+const departed = (id: string) => { const seen = new Set<string>(); return events('LEAVE', id).filter((x: M) => !seen.has(String(x.userId)) && (seen.add(String(x.userId)), true)).reverse(); };
+const appendEvent = (type: EventKind, e: any) => { const s = load(STATE); const h = Array.isArray(s.memberEvents) ? s.memberEvents : []; const ids = Array.isArray(e?.member?.ids) ? e.member.ids : [e?.userId ?? e?.memberId ?? e?.sender?.id ?? e?.member?.id ?? '']; const names = Array.isArray(e?.member?.names) ? e.member.names : [e?.nickname ?? e?.name ?? e?.member?.name ?? e?.sender?.name ?? '알 수 없음']; const out = ids.map((id: any, i: number) => ({ type, at: new Date().toISOString(), roomId: String(e?.roomId ?? e?.chatId ?? e?.room?.id ?? e?.chat?.id ?? ''), roomName: String(e?.roomName ?? e?.room?.name ?? e?.chat?.name ?? ''), userId: String(id ?? ''), nickname: String(names[i] ?? names[0] ?? '알 수 없음') })).filter((x: M) => x.userId); if (!out.length) return null; h.push(...out); save(STATE, { ...s, memberEvents: h.slice(-MAX_EVENTS), lastMemberEvent: out.at(-1), updatedAt: new Date().toISOString() }); return out.at(-1); };
+const reader = (v: any, depth = 0, seen = new Set<any>()): M | null => { if (!v || typeof v !== 'object' || depth > 6 || seen.has(v)) return null; seen.add(v); for (const [k, raw] of Object.entries(v)) { const n = k.toLowerCase(); if (['readers','reader','readusers','readby','seenby','readmembers','readmember'].includes(n)) { const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.values(raw) : []; const ids: string[] = [], names: string[] = []; for (const x of list as any[]) { const id = x?.userId ?? x?.id ?? x?.memberId ?? x?.uid ?? (typeof x === 'string' || typeof x === 'number' ? x : undefined); const name = x?.name ?? x?.nickname ?? x?.nickName; if (id != null) ids.push(String(id)); if (name) names.push(String(name)); } if (ids.length || names.length) return { ids: [...new Set(ids)], names: [...new Set(names)], source: k }; } if (['readercount','readcount','seencount','seen_count','readers_count'].includes(n)) { const count = Number(raw); if (Number.isFinite(count)) return { ids: [], names: [], count, source: k }; } } for (const x of Object.values(v)) { const r = reader(x, depth + 1, seen); if (r) return r; } return null; };
+const record = (c: any, m: any, r: M) => { const id = String(m?.message?.id ?? m?.message?.logId ?? m?.logId ?? m?.id ?? ''); if (!id) return; const x = reader(m) ?? reader(m?.message?.raw); r.messages[id] = { messageId: id, roomId: String(c?.id ?? ''), senderId: senderId(m), senderName: senderName(m), text: text(m), readerIds: x?.ids ?? [], readerNames: x?.names ?? [], readerCount: x?.count, available: Boolean(x), at: new Date().toISOString() }; r.readers[id] = r.messages[id]; const keys = Object.keys(r.messages); if (keys.length > MAX_MESSAGES) for (const k of keys.slice(0, keys.length - MAX_MESSAGES)) delete r.messages[k]; };
+const help = () => ['╭──── LOCO-TERMUX 명령어 전체보기 ────╮','│ !핑 !명령어 !봇정보 !봇상태','│ !관리자 @유저 !관리자해제 @유저 !관리자목록','│ !입장로그 !퇴장로그 !입퇴장로그','│ !나간사람 !나간사람내보내기 !읽은사람 !채팅순위','│ !kick @유저 또는 답장 후 !kick','│ !allkick','│ !봇등록 !방등록해제','│ !도박가입 !도박 <포인트>','╰────────────────────────────╯'].join('\n');
+const members = async (client: any, id: string, r: M) => { try { if (typeof client._resolveChatMembers === 'function') { const ids = await client._resolveChatMembers(id); const out = []; for (const x of ids ?? []) { let n = ''; try { if (typeof client.getUsernameById === 'function') n = String(await client.getUsernameById(id, x) || ''); } catch {} out.push({ id: String(x), name: n }); } if (out.length) return out; } } catch {} return Object.entries(r.users ?? {}).map(([i, v]: [string, any]) => ({ id: i, name: String(v?.nickname ?? '') })); };
+const kick = async (client: any, chat: any, id: string, t: any, send: (s: string) => Promise<void>) => { if (!t?.id || t.id === String(client.userId)) return send('❌ 내보낼 대상을 확인할 수 없습니다.'); if (typeof chat?.openChatKick !== 'function') return send('❌ 현재 연결에서 내보내기 기능을 사용할 수 없습니다.'); if (!/^\d+$/.test(t.id)) return send('❌ 대상 ID가 올바르지 않습니다.'); try { await chat.openChatKick(id, Number(t.id)); appendEvent('KICK', { roomId: id, roomName: roomName(chat), userId: t.id, nickname: t.name || '알 수 없음' }); await send(`✅ ${t.name ? `@${t.name}` : t.id} 내보내기 완료`); } catch (e) { await send(`❌ 내보내기 실패: ${e instanceof Error ? e.message : String(e)}`); } };
 
-function loadJson(path: string): AnyMap {
+async function command(client: any, chat: any, msg: any) {
+  const t = text(msg), id = roomId(chat, msg), uid = senderId(msg); if (!t.startsWith('!') || !id || !uid || uid === String(client.userId)) return;
+  const s = state(), r = room(s, id), name = senderName(msg); r.users[uid] ??= { nickname: name, messages: 0, points: 0, joined: true }; r.users[uid].nickname = name || r.users[uid].nickname; r.users[uid].messages = Number(r.users[uid].messages || 0) + 1;
+  const send = async (v: string) => { for (const x of chunks(v)) await chat.sendText(id, x); };
+  const [cmd, ...args] = t.split(/\s+/), a = admin(client, msg, r, uid);
   try {
-    const value = JSON.parse(readFileSync(path, 'utf8'));
-    return value && typeof value === 'object' ? value : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveJson(path: string, value: unknown): void {
-  mkdirSync(DATA_DIR, { recursive: true });
-  writeFileSync(path, JSON.stringify(value, null, 2), 'utf8');
-}
-
-function patchState(patch: AnyMap): void {
-  const state = loadJson(STATE_PATH);
-  saveJson(STATE_PATH, { ...state, ...patch, updatedAt: new Date().toISOString() });
-}
-
-function commandState(): AnyMap {
-  return loadJson(COMMAND_STATE_PATH);
-}
-
-function saveCommandState(state: AnyMap): void {
-  saveJson(COMMAND_STATE_PATH, state);
-}
-
-function getRoomState(state: AnyMap, roomId: string): AnyMap {
-  state.rooms ??= {};
-  state.rooms[roomId] ??= {
-    registered: false,
-    code: null,
-    codeExpiresAt: 0,
-    registeredAt: null,
-    users: {},
-    admins: {},
-    readers: {},
-    messages: {},
-  };
-  const room = state.rooms[roomId];
-  room.users ??= {};
-  room.admins ??= {};
-  room.readers ??= {};
-  room.messages ??= {};
-  return room;
-}
-
-function getDeveloperId(client: any): string {
-  const env = String(process.env.LOCO_DEVELOPER_ID ?? '').trim();
-  if (env) return env;
-  try {
-    return readFileSync(DEVELOPER_ID_PATH, 'utf8').trim();
-  } catch {
-    const id = String(client?.userId ?? '').trim();
-    if (id) writeFileSync(DEVELOPER_ID_PATH, id, 'utf8');
-    return id;
-  }
-}
-
-function isDeveloper(client: any, userId: string): boolean {
-  return Boolean(userId) && userId === getDeveloperId(client);
-}
-
-function senderLooksManager(msg: any): boolean {
-  const sender = msg?.sender ?? msg?.member ?? {};
-  const values = [
-    sender?.isManager,
-    sender?.isAdmin,
-    sender?.isHost,
-    sender?.isOwner,
-    sender?.isRoomAdmin,
-    sender?.isModerator,
-    sender?.role,
-    sender?.type,
-    sender?.memberType,
-    sender?.privilege,
-    sender?.authority,
-    sender?.status,
-  ];
-  if (values.some((v) => v === true)) return true;
-  const normalized = values.map((v) => String(v ?? '').toUpperCase());
-  return normalized.some((v) => ['ADMIN', 'MANAGER', 'HOST', 'OWNER', 'MODERATOR', 'LEADER', '부방장', '방장', '관리자'].includes(v));
-}
-
-function canModerate(client: any, msg: any, room: AnyMap, userId: string): boolean {
-  return isDeveloper(client, userId) || senderLooksManager(msg) || Boolean(room?.admins?.[userId]);
-}
-
-function mentions(msg: any): any[] {
-  const values = [
-    msg?.message?.mentions,
-    msg?.message?.mention,
-    msg?.mentions,
-    msg?.mention,
-    msg?.message?.meta?.mentions,
-    msg?.message?.metadata?.mentions,
-  ];
-  return values.flatMap((value) => Array.isArray(value) ? value : value ? [value] : []);
-}
-
-function mentionTarget(msg: any): { id: string; name: string } | null {
-  for (const item of mentions(msg)) {
-    const id = item?.userId ?? item?.id ?? item?.memberId ?? item?.user?.id;
-    if (id == null) continue;
-    const name = item?.name ?? item?.nickname ?? item?.user?.name ?? item?.user?.nickname ?? '';
-    return { id: String(id), name: String(name) };
-  }
-  return null;
-}
-
-function replyTarget(msg: any): { id: string; name: string } | null {
-  const reply = msg?.replyTo ?? msg?.reply ?? msg?.message?.replyTo ?? msg?.message?.reply ?? msg?.message?.quote ?? msg?.quote ?? msg?.message?.metadata?.reply;
-  if (!reply) return null;
-  const id = reply?.userId ?? reply?.memberId ?? reply?.sender?.id ?? reply?.author?.id;
-  if (id == null) return null;
-  const name = reply?.nickname ?? reply?.name ?? reply?.sender?.name ?? reply?.author?.name ?? '';
-  return { id: String(id), name: String(name) };
-}
-
-function roomIdOf(chat: any, msg?: any): string {
-  return String(msg?.room?.id ?? msg?.chatId ?? chat?.id ?? chat?.chatId ?? '');
-}
-
-function roomNameOf(chat: any, msg?: any): string {
-  return String(msg?.room?.name ?? chat?.name ?? chat?.roomName ?? chat?.title ?? '');
-}
-
-function textOf(msg: any): string {
-  return String(msg?.message?.text ?? msg?.text ?? '').trim();
-}
-
-function fmtTime(value: any): string {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value ?? '') : date.toLocaleString('ko-KR', { hour12: false });
-}
-
-function chunks(lines: string[], max = 1800): string[] {
-  const output: string[] = [];
-  let current = '';
-  for (const line of lines) {
-    if (current && current.length + line.length + 1 > max) {
-      output.push(current);
-      current = '';
+    switch (cmd.toLowerCase()) {
+      case '!명령어': await send(help()); break;
+      case '!핑': await send('🏓 pong!'); break;
+      case '!봇정보': await send(`🤖 LOCO-Termux\n방: ${roomName(chat, msg) || id}\n전송계층: ${client.transport || 'unknown'}\n연결: ${client.connected ? 'YES' : 'NO'}\n관리자: ${Object.keys(r.admins).length}명`); break;
+      case '!관리자': case '!관리자해제': { if (!manager(msg) && uid !== developerId(client)) return send('❌ 실제 방장/부방장만 사용할 수 있습니다.'); const x = mentionTarget(msg); if (!x) return send(`사용법: ${cmd} @유저`); if (cmd.toLowerCase() === '!관리자') r.admins[x.id] = { id: x.id, name: x.name }; else delete r.admins[x.id]; save(CMD, s); await send(`${cmd.toLowerCase() === '!관리자' ? '🛡️ 등록' : '✅ 해제'} 완료: ${x.name || x.id}`); break; }
+      case '!관리자목록': if (!a) return send('🔒 권한이 없습니다.'); await send(Object.values(r.admins).length ? ['🛡️ 관리자 전체보기', ...Object.values(r.admins).map((x: any, i) => `${i + 1}. ${x.name || x.id}`)].join('\n') : '🛡️ 등록된 관리자가 없습니다.'); break;
+      case '!입장로그': case '!퇴장로그': case '!입퇴장로그': { if (!a) return send('🔒 권한이 없습니다.'); const type = cmd === '!입장로그' ? 'JOIN' : cmd === '!퇴장로그' ? 'LEAVE' : ''; const rows = events(type, id).reverse(); await send([cmd === '!입장로그' ? '📥 전체 입장 로그' : cmd === '!퇴장로그' ? '📤 전체 퇴장 로그' : '📋 전체 입퇴장 로그', ...(rows.length ? rows.map((x: M, i) => `${i + 1}. ${x.nickname} (${x.userId}) · ${fmt(x.at)}`) : ['기록이 없습니다.'])].join('\n')); break; }
+      case '!나간사람': { if (!a) return send('🔒 권한이 없습니다.'); const rows = departed(id); await send(rows.length ? ['🚪 나간 사람 전체보기', ...rows.map((x: M, i) => `${i + 1}. ${x.nickname} (${x.userId}) · ${fmt(x.at)}`)].join('\n') : '🚪 나간 사람 기록이 없습니다.'); break; }
+      case '!나간사람내보내기': { if (!a) return send('🔒 권한이 없습니다.'); const rows = departed(id); if (!rows.length) return send('🚪 내보낼 기록이 없습니다.'); let ok = 0; for (const x of rows) { try { if (typeof chat.openChatKick === 'function' && /^\d+$/.test(String(x.userId)) && String(x.userId) !== String(client.userId)) { await chat.openChatKick(id, Number(x.userId)); ok++; } } catch {} } await send(`🚪 내보내기 요청: ${ok}/${rows.length}명`); break; }
+      case '!읽은사람': { if (!a) return send('🔒 권한이 없습니다.'); const mid = String(args[0] ?? msg?.message?.id ?? ''); const x = r.readers[mid] ?? r.messages[mid]; if (!x) return send('❌ 해당 메시지의 읽음 데이터가 없습니다.'); const names = Array.isArray(x.readerNames) ? x.readerNames.filter(Boolean) : []; await send(`👀 메시지 ${mid}\n읽은 사람: ${names.length ? names.join(', ') : '(읽음 목록 미제공)'}\n읽음 수: ${x.readerCount ?? names.length}`); break; }
+      case '!채팅순위': { if (!a) return send('🔒 권한이 없습니다.'); const rows = Object.entries(r.users).sort((x: any, y: any) => Number(y[1]?.messages || 0) - Number(x[1]?.messages || 0)); await send(['🏆 채팅 순위', ...(rows.length ? rows.slice(0, 20).map(([i, x]: [string, any], n) => `${n + 1}. ${x.nickname || i} · ${Number(x.messages || 0)}회`) : ['기록이 없습니다.'])].join('\n')); break; }
+      case '!kick': { if (!a) return send('🔒 권한이 없습니다.'); const x = mentionTarget(msg) ?? replyTarget(msg); if (!x) return send('사용법: !kick @유저 또는 대상 메시지에 답장 후 !kick'); await kick(client, chat, id, x, send); break; }
+      case '!allkick': { if (uid !== developerId(client)) return send('🔒 !allkick은 개발자만 사용할 수 있습니다.'); const ms = await members(client, id, r); let ok = 0; for (const x of ms) { if (x.id === String(client.userId) || !/^\d+$/.test(x.id)) continue; try { if (typeof chat.openChatKick === 'function') { await chat.openChatKick(id, Number(x.id)); ok++; } } catch {} } await send(`⚠️ 전체 내보내기 요청: ${ok}/${Math.max(0, ms.length - 1)}명`); break; }
+      case '!봇등록': { if (!manager(msg) && uid !== developerId(client)) return send('❌ 실제 방장/부방장만 등록할 수 있습니다.'); const code = String(randomInt(10000000, 100000000)); r.code = code; r.codeExpiresAt = Date.now() + CODE_TTL; r.registered = false; save(CMD, s); console.log(`[방등록] ${roomName(chat, msg) || id} | roomId=${id} | code=${code}`); await send(`🔐 방 등록 코드: ${code}\n5분 안에 이 방에서 ${code} 를 입력하세요.`); break; }
+      case '!방등록해제': if (!a) return send('🔒 권한이 없습니다.'); r.registered = false; r.code = null; r.codeExpiresAt = 0; save(CMD, s); await send('✅ 이 방의 봇 등록을 해제했습니다.'); break;
+      case '!도박가입': r.users[uid].points = Number(r.users[uid].points || 0) || 1000; save(CMD, s); await send(`🎰 가입 완료! 보유 포인트: ${r.users[uid].points}P`); break;
+      case '!도박': { const n = Math.floor(Number(args[0])); const bal = Number(r.users[uid].points || 0); if (!Number.isFinite(n) || n <= 0) return send('사용법: !도박 <포인트>'); if (bal < n) return send(`❌ 포인트 부족. 현재 ${bal}P`); if (Math.random() < .5) { r.users[uid].points = bal + n * 2; await send(`🎉 당첨! +${n * 2}P\n보유: ${r.users[uid].points}P`); } else { r.users[uid].points = bal - n; await send(`💥 꽝! -${n}P\n보유: ${r.users[uid].points}P`); } save(CMD, s); break; }
     }
-    current += `${current ? '\n' : ''}${line}`;
-  }
-  if (current) output.push(current);
-  return output;
+  } catch (e) { console.error('[COMMAND]', e instanceof Error ? e.stack || e.message : String(e)); try { await send('❌ 명령 처리 중 오류가 발생했습니다.'); } catch {} }
+  save(CMD, s);
 }
 
-function appendMemberEvent(type: EventKind, event: any): AnyMap | null {
-  const state = loadJson(STATE_PATH);
-  const history = Array.isArray(state.memberEvents) ? state.memberEvents : [];
-  const roomId = String(event?.roomId ?? event?.chatId ?? event?.room?.id ?? event?.chat?.id ?? '');
-  const ids = Array.isArray(event?.member?.ids)
-    ? event.member.ids
-    : [event?.userId ?? event?.memberId ?? event?.sender?.id ?? event?.member?.id ?? ''];
-  const names = Array.isArray(event?.member?.names)
-    ? event.member.names
-    : [event?.nickname ?? event?.name ?? event?.member?.name ?? event?.sender?.name ?? '알 수 없음'];
-  const items = ids
-    .map((id: any, index: number) => ({
-      type,
-      at: new Date().toISOString(),
-      roomId,
-      roomName: String(event?.roomName ?? event?.room?.name ?? event?.chat?.name ?? ''),
-      userId: String(id ?? ''),
-      nickname: String(names[index] ?? names[0] ?? '알 수 없음'),
-    }))
-    .filter((item: AnyMap) => item.userId);
-  if (!items.length) return null;
-  history.push(...items);
-  saveJson(STATE_PATH, {
-    ...state,
-    memberEvents: history.slice(-MAX_EVENTS),
-    lastMemberEvent: items.at(-1),
-    updatedAt: new Date().toISOString(),
-  });
-  return items.at(-1) ?? null;
+function verify(client: any, chat: any, msg: any) { const t = text(msg); if (!/^\d{8}$/.test(t)) return false; const id = roomId(chat, msg), uid = senderId(msg); if (!id || !uid || uid === String(client.userId)) return false; const s = state(), r = room(s, id); if (!r.code || Date.now() > Number(r.codeExpiresAt || 0)) { r.code = null; r.codeExpiresAt = 0; save(CMD, s); return false; } if (t !== String(r.code)) return false; r.registered = true; r.code = null; r.codeExpiresAt = 0; r.registeredAt = new Date().toISOString(); save(CMD, s); console.log(`[방등록] 인증 성공 | ${roomName(chat, msg) || id} | roomId=${id}`); return true; }
+
+async function sync(client: any) { try { const x = await client.getChatRooms(), raw = Array.isArray(x?.chats) ? x.chats : Array.isArray(x) ? x : [], rooms = raw.map((v: any) => ({ id: String(v?.id ?? v?.chatId ?? v?.roomId ?? v?.c ?? ''), name: String(v?.name ?? v?.roomName ?? v?.title ?? ''), isOpenChat: v?.isOpenChat === true, isGroupChat: v?.isGroupChat === true })).filter((v: M) => v.id); const s = load(STATE); save(STATE, { ...s, connected: true, rooms, roomCount: rooms.length, lastRoomSyncAt: new Date().toISOString() }); return rooms.length; } catch (e) { const s = load(STATE); save(STATE, { ...s, connected: Boolean(client.connected), roomSyncError: String(e), updatedAt: new Date().toISOString() }); return 0; } }
+
+async function main() {
+  if (!existsSync(AUTH)) throw new Error(`인증 세션이 없습니다: ${AUTH}`);
+  const client: any = createClient({ authPath: AUTH, autoConnect: false, autoReconnect: true, reconnectMinDelayMs: 1000, reconnectMaxDelayMs: 30000, pingIntervalMs: 60000, socketKeepAliveMs: 30000, memberRefreshIntervalMs: 60000, memberLookupTimeoutMs: 3000, sendIntervalMs: 400, debug: process.env.LOCO_DEBUG === '1' });
+  const mark = (connected: boolean, extra: M = {}) => { const s = load(STATE); save(STATE, { ...s, connected, transport: client.transport || null, userId: String(client.userId || ''), developerId: developerId(client), heartbeatAt: new Date().toISOString(), ...extra }); };
+  client.on('connected', () => mark(true, { lastConnectedAt: new Date().toISOString(), error: null }));
+  client.on('disconnected', () => mark(false, { lastDisconnectedAt: new Date().toISOString() }));
+  client.on('kickout', (p: any) => mark(false, { kickout: p }));
+  client.on('error', (e: any) => { console.error('[LOCO]', e instanceof Error ? e.stack || e.message : String(e)); mark(Boolean(client.connected), { error: String(e) }); });
+  client.onReady(async () => { console.log(`[LOCO] READY userId=${client.userId} transport=${client.transport || 'unknown'}`); mark(true, { readyAt: new Date().toISOString() }); await sync(client); });
+  client.onMessage(async (chat: any, msg: any) => { const id = roomId(chat, msg); if (!id) return; const s = state(), r = room(s, id), uid = senderId(msg); if (uid && uid !== String(client.userId)) { r.users[uid] ??= { nickname: '', messages: 0, points: 0, joined: true }; r.users[uid].nickname = senderName(msg) || r.users[uid].nickname; } record(msg?.room ?? chat, msg, r); save(CMD, s); if (verify(client, chat, msg)) { try { await chat.sendText(id, '✅ 방 등록 완료! 이제 이 방에서 봇 기능을 사용할 수 있습니다.'); } catch {} return; } await command(client, chat, msg); });
+  client.onJoin((e: any) => { const x = appendEvent('JOIN', e); if (x) console.log(`[JOIN] ${x.roomId} ${x.nickname} (${x.userId})`); });
+  client.onLeave((e: any) => { const x = appendEvent('LEAVE', e); if (x) console.log(`[LEAVE] ${x.roomId} ${x.nickname} (${x.userId})`); });
+  client.onKick((e: any) => { const x = appendEvent('KICK', e); if (x) console.log(`[KICK] ${x.roomId} ${x.nickname} (${x.userId})`); });
+  await client.connect(); await sync(client);
+  const timer = setInterval(() => void sync(client), SYNC), beat = setInterval(() => mark(Boolean(client.connected), { runtime: 'openchat', pid: process.pid }), HEARTBEAT);
+  const shutdown = () => { clearInterval(timer); clearInterval(beat); try { client.disconnect(); } catch {} mark(false, { stoppedAt: new Date().toISOString() }); };
+  process.once('SIGTERM', shutdown); process.once('SIGINT', shutdown);
+  console.log('[LOCO] OpenChat runtime is running.'); await new Promise<void>(() => undefined);
 }
 
-function eventHistory(type: string, roomId: string): AnyMap[] {
-  const state = loadJson(STATE_PATH);
-  const history = Array.isArray(state.memberEvents) ? state.memberEvents : [];
-  return history.filter((item: AnyMap) => (!type || item.type === type) && String(item.roomId) === roomId);
-}
-
-function departedRows(roomId: string): AnyMap[] {
-  const seen = new Set<string>();
-  return eventHistory('LEAVE', roomId).filter((item) => {
-    const id = String(item.userId);
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  }).reverse();
-}
-
-function readerSnapshot(value: any, depth = 0, seen = new Set<any>()): AnyMap | null {
-  if (!value || typeof value !== 'object' || depth > 6 || seen.has(value)) return null;
-  seen.add(value);
-  for (const [key, raw] of Object.entries(value)) {
-    const normalized = key.toLowerCase();
-    if (['readers', 'reader', 'readusers', 'readby', 'seenby', 'readmembers', 'readmember'].includes(normalized)) {
-      const list = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? Object.values(raw) : [];
-      const ids: string[] = [];
-      const names: string[] = [];
-      for (const item of list as any[]) {
-        const id = item?.userId ?? item?.id ?? item?.memberId ?? item?.uid ?? (typeof item === 'string' || typeof item === 'number' ? item : undefined);
-        const name = item?.name ?? item?.nickname ?? item?.nickName;
-        if (id != null) ids.push(String(id));
-        if (name) names.push(String(name));
-      }
-      if (ids.length || names.length) return { ids: [...new Set(ids)], names: [...new Set(names)], source: key };
-    }
-    if (['readercount', 'readcount', 'seencount', 'seen_count', 'readers_count'].includes(normalized)) {
-      const count = Number(raw);
-      if (Number.isFinite(count)) return { ids: [], names: [], count, source: key };
-    }
-  }
-  for (const child of Object.values(value)) {
-    const result = readerSnapshot(child, depth + 1, seen);
-    if (result) return result;
-  }
-  return null;
-}
-
-function recordMessage(room: any, msg: any, roomState: AnyMap): void {
-  const id = String(msg?.message?.id ?? msg?.message?.logId ?? msg?.logId ?? msg?.id ?? '');
-  if (!id) return;
-  const snapshot = readerSnapshot(msg) ?? readerSnapshot(msg?.message?.raw);
-  roomState.messages[id] = {
-    messageId: id,
-    roomId: String(room?.id ?? ''),
-    senderId: String(msg?.sender?.id ?? ''),
-    senderName: String(msg?.sender?.name ?? ''),
-    text: textOf(msg),
-    readerIds: snapshot?.ids ?? [],
-    readerNames: snapshot?.names ?? [],
-    readerCount: snapshot?.count,
-    available: Boolean(snapshot),
-    at: new Date().toISOString(),
-  };
-  roomState.readers[id] = roomState.messages[id];
-  const entries = Object.entries(roomState.messages);
-  if (entries.length > MAX_MESSAGES_PER_ROOM) {
-    for (const [oldId] of entries.slice(0, entries.length - MAX_MESSAGES_PER_ROOM)) delete roomState.messages[oldId];
-  }
-}
-
-function helpText(): string {
-  return [
-    '╭────── LOCO-TERMUX 명령어 전체보기 ──────╮',
-    '│ 기본',
-    '│ !핑  !명령어  !봇정보',
-    '│',
-    '│ 관리자',
-    '│ !관리자 @유저  !관리자해제 @유저  !관리자목록',
-    '│ !입장로그  !퇴장로그  !입퇴장로그',
-    '│ !나간사람  !나간사람내보내기  !읽은사람  !채팅순위',
-    '│',
-    '│ 내보내기',
-    '│ !kick @유저  /  답장한 입퇴장 로그 대상도 지원',
-    '│ !allkick',
-    '│',
-    '│ 방 관리',
-    '│ !봇등록  !방등록해제',
-    '│',
-    '│ 게임',
-    '│ !도박가입  !도박 <포인트>',
-    '╰──────────────────────────────────────╯',
-  ].join('\n');
-}
-
-async function kick(client: any, chat: any, roomId: string, target: { id: string; name?: string }, send: (text: string) => Promise<any>): Promise<void> {
-  if (!target.id || target.id === String(client.userId)) {
-    await send('❌ 내보낼 대상을 확인할 수 없습니다.');
-    return;
-  }
-  if (typeof chat?.openChatKick !== 'function') {
-    await send('❌ 현재 연결에서 OpenChat 내보내기 기능을 사용할 수 없습니다.');
-    return;
-  }
-  try {
-    await chat.openChatKick(roomId, Number(target.id));
-    appendMemberEvent('KICK', { roomId, roomName: roomNameOf(chat), userId: target.id, nickname: target.name || '알 수 없음' });
-    await send(`✅ ${target.name ? `@${target.name}` : target.id} 내보내기 완료`);
-  } catch (error) {
-    await send(`❌ 내보내기 실패: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-async function getMembers(client: any, roomId: string, room: AnyMap): Promise<{ id: string; name: string }[]> {
-  try {
-    if (typeof client._resolveChatMembers === 'function') {
-      const ids = await client._resolveChatMembers(roomId);
-      const result: { id: string; name: string }[] = [];
-      for (const id of ids ?? []) {
-        let name = '';
-        if (typeof client.getUsernameById === 'function') {
-          try { name = String(await client.getUsernameById(roomId, id) || ''); } catch {}
-        }
-        result.push({ id: String(id), name });
-      }
-      if (result.length) return result;
-    }
-  } catch (error) {
-    console.error('[MEMBERS]', error instanceof Error ? error.message : String(error));
-  }
-  return Object.entries(room.users ?? {}).map(([id, value]: [string, any]) => ({ id, name: String(value?.nickname ?? '') }));
-}
-
-async function handleCommand(client: any, chat: any, msg: any): Promise<void> {
-  const text = textOf(msg);
-  if (!text.startsWith('!')) return;
-  if (String(msg?.sender?.id ?? '') === String(client?.userId ?? '')) return;
-
-  const roomId = roomIdOf(chat, msg);
-  if (!roomId) return;
-
-  const state = commandState();
-  const room = getRoomState(state, roomId);
-  const userId = String(msg?.sender?.id ?? '');
-  const senderName = String(msg?.sender?.name ?? '');
-  room.users[userId] ??= { nickname: senderName, messages: 0, points: 0, joined: true };
-  room.users[userId].nickname = senderName || room.users[userId].nickname;
-  room.users[userId].messages = Number(room.users[userId].messages || 0) + 1;
-
-  const send = async (message: string) => {
-    const pieces = chunks([message]);
-    for (const piece of pieces) await chat.sendText(roomId, piece);
-  };
-  const parts = text.split(/\s+/);
-  const command = parts[0].toLowerCase();
-  const args = parts.slice(1);
-  const moderator = canModerate(client, msg, room, userId);
-
-  try {
-    switch (command) {
-      case '!명령어':
-        await send(helpText());
-        break;
-      case '!핑':
-        await send('🏓 pong!');
-        break;
-      case '!봇정보':
-        await send(`🤖 LOCO-Termux\n방: ${roomNameOf(chat, msg) || roomId}\n전송계층: ${client.transport || 'offline'}\n연결: ${client.connected ? 'YES' : 'NO'}\n등록 관리자: ${Object.keys(room.admins).length}명`);
-        break;
-      case '!관리자': {
-        if (!senderLooksManager(msg) && !isDeveloper(client, userId)) { await send('❌ 실제 방장/부방장만 등록할 수 있습니다.'); break; }
-        const target = mentionTarget(msg);
-        if (!target) { await send('사용법: !관리자 @유저'); break; }
-        room.admins[target.id] = { id: target.id, name: target.name };
-        saveCommandState(state);
-        await send(`🛡️ ${target.name ? `@${target.name}` : target.id} 등록 완료`);
-        break;
-      }
-      case '!관리자해제': {
-        if (!senderLooksManager(msg) && !isDeveloper(client, userId)) { await send('❌ 실제 방장/부방장만 해제할 수 있습니다.'); break; }
-        const target = mentionTarget(msg);
-        if (!target) { await send('사용법: !관리자해제 @유저'); break; }
-        delete room.admins[target.id];
-        saveCommandState(state);
-        await send(`✅ ${target.name ? `@${target.name}` : target.id} 해제 완료`);
-        break;
-      }
-      case '!관리자목록':
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        await send(['🛡️ 등록 관리자 전체보기', ...Object.values(room.admins).map((item: any, i: number) => `${i + 1}. ${item.name || item.id}`)].join('\n') || '등록된 관리자가 없습니다.');
-        break;
-      case '!입장로그':
-      case '!퇴장로그':
-      case '!입퇴장로그': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const type = command === '!입장로그' ? 'JOIN' : command === '!퇴장로그' ? 'LEAVE' : '';
-        const rows = eventHistory(type, roomId).reverse();
-        const title = type === 'JOIN' ? '📥 전체 입장 로그' : type === 'LEAVE' ? '📤 전체 퇴장 로그' : '📋 전체 입퇴장 로그';
-        const lines = rows.length ? rows.map((item, i) => `${i + 1}. ${item.nickname} (${item.userId}) · ${fmtTime(item.at)}`) : ['기록이 없습니다.'];
-        for (const piece of chunks([title, ...lines])) await send(piece);
-        break;
-      }
-      case '!나간사람': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const rows = departedRows(roomId);
-        await send(rows.length ? ['🚪 나간 사람 전체보기', ...rows.map((item, i) => `${i + 1}. ${item.nickname} (${item.userId}) · ${fmtTime(item.at)}`)].join('\n') : '🚪 나간 사람 기록이 없습니다.');
-        break;
-      }
-      case '!나간사람내보내기': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const rows = departedRows(roomId);
-        if (!rows.length) { await send('🚪 내보낼 나간 사람 기록이 없습니다.'); break; }
-        let ok = 0;
-        for (const item of rows) {
-          try {
-            if (typeof chat.openChatKick === 'function') {
-              await chat.openChatKick(roomId, Number(item.userId));
-              ok += 1;
-            }
-          } catch {}
-        }
-        await send(`🚪 요청 완료: ${ok}/${rows.length}명`);
-        break;
-      }
-      case '!읽은사람': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const messageId = String(args[0] ?? msg?.message?.id ?? '');
-        const item = room.readers[messageId] ?? room.messages[messageId];
-        if (!item) { await send('❌ 해당 메시지의 읽음 데이터가 없습니다.'); break; }
-        const names = Array.isArray(item.readerNames) ? item.readerNames.filter(Boolean) : [];
-        await send(`👀 메시지 ${messageId}\n읽은 사람: ${names.length ? names.join(', ') : '(이벤트에 읽음 목록이 포함되지 않음)'}\n읽음 수: ${item.readerCount ?? (names.length || 0)}`);
-        break;
-      }
-      case '!채팅순위': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const rows = Object.entries(room.users).sort((a: any, b: any) => Number(b[1]?.messages || 0) - Number(a[1]?.messages || 0));
-        await send(['🏆 채팅 순위', ...rows.slice(0, 20).map(([id, value]: [string, any], i) => `${i + 1}. ${value.nickname || id} · ${Number(value.messages || 0)}회`)].join('\n') || '기록이 없습니다.');
-        break;
-      }
-      case '!kick': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const target = mentionTarget(msg) ?? replyTarget(msg);
-        if (!target) { await send('사용법: !kick @유저 또는 대상 메시지에 답장 후 !kick'); break; }
-        await kick(client, chat, roomId, target, send);
-        break;
-      }
-      case '!allkick': {
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        const members = await getMembers(client, roomId, room);
-        let ok = 0;
-        for (const member of members) {
-          if (member.id === String(client.userId)) continue;
-          try {
-            if (typeof chat.openChatKick === 'function') {
-              await chat.openChatKick(roomId, Number(member.id));
-              ok += 1;
-            }
-          } catch {}
-        }
-        await send(`⚠️ 전체 내보내기 요청 완료: ${ok}/${Math.max(0, members.length - 1)}명`);
-        break;
-      }
-      case '!봇등록': {
-        if (!senderLooksManager(msg) && !isDeveloper(client, userId)) { await send('❌ 실제 방장/부방장만 등록할 수 있습니다.'); break; }
-        const code = String(randomInt(100, 1000));
-        room.code = code;
-        room.codeExpiresAt = Date.now() + ROOM_VERIFY_TTL;
-        room.registered = false;
-        saveCommandState(state);
-        console.log(`[방등록] ${roomNameOf(chat, msg) || roomId} | roomId=${roomId} | code=${code} | expires=${new Date(room.codeExpiresAt).toISOString()}`);
-        await send(`🔐 방 등록 코드: ${code}\n5분 안에 이 방에서 ${code} 를 입력하세요.`);
-        break;
-      }
-      case '!방등록해제':
-        if (!moderator) { await send('🔒 권한이 없습니다.'); break; }
-        room.registered = false;
-        room.code = null;
-        room.codeExpiresAt = 0;
-        saveCommandState(state);
-        await send('✅ 이 방의 봇 등록을 해제했습니다.');
-        break;
-      case '!도박가입':
-        if (!room.users[userId].points) room.users[userId].points = 1000;
-        saveCommandState(state);
-        await send(`🎰 가입 완료! 보유 포인트: ${room.users[userId].points}P`);
-        break;
-      case '!도박': {
-        const amount = Math.floor(Number(args[0]));
-        if (!Number.isFinite(amount) || amount <= 0) { await send('사용법: !도박 <포인트>'); break; }
-        const balance = Number(room.users[userId].points || 0);
-        if (balance < amount) { await send(`❌ 포인트 부족. 현재 ${balance}P`); break; }
-        if (Math.random() < 0.5) {
-          room.users[userId].points = balance + amount * 2;
-          await send(`🎉 당첨! +${amount * 2}P\n보유: ${room.users[userId].points}P`);
-        } else {
-          room.users[userId].points = balance - amount;
-          await send(`💥 꽝! -${amount}P\n보유: ${room.users[userId].points}P`);
-        }
-        saveCommandState(state);
-        break;
-      }
-      default:
-        break;
-    }
-  } catch (error) {
-    console.error('[COMMAND]', error instanceof Error ? error.stack || error.message : String(error));
-    try { await send('❌ 명령 처리 중 오류가 발생했습니다. 런타임 로그를 확인하세요.'); } catch {}
-  }
-
-  saveCommandState(state);
-}
-
-function verifyRoomCode(client: any, chat: any, msg: any): boolean {
-  const text = textOf(msg);
-  if (!/^\d{3}$/.test(text)) return false;
-  const roomId = roomIdOf(chat, msg);
-  const userId = String(msg?.sender?.id ?? '');
-  if (!roomId || !userId || userId === String(client.userId)) return false;
-  const state = commandState();
-  const room = getRoomState(state, roomId);
-  const code = String(room.code ?? '');
-  const expires = Number(room.codeExpiresAt ?? 0);
-  if (!code || !expires) return false;
-  if (Date.now() > expires) {
-    room.code = null;
-    room.codeExpiresAt = 0;
-    saveCommandState(state);
-    return false;
-  }
-  if (text !== code) return false;
-  room.registered = true;
-  room.code = null;
-  room.codeExpiresAt = 0;
-  room.registeredAt = new Date().toISOString();
-  saveCommandState(state);
-  console.log(`[방등록] 인증 성공 | ${roomNameOf(chat, msg) || roomId} | roomId=${roomId}`);
-  return true;
-}
-
-async function syncRooms(client: any): Promise<number> {
-  try {
-    const result = await client.getChatRooms();
-    const raw = Array.isArray(result?.chats) ? result.chats : Array.isArray(result) ? result : [];
-    const rooms = raw.map((item: any) => ({
-      id: String(item?.id ?? item?.chatId ?? item?.roomId ?? item?.c ?? ''),
-      name: String(item?.name ?? item?.roomName ?? item?.title ?? ''),
-      isOpenChat: item?.isOpenChat === true,
-      isGroupChat: item?.isGroupChat === true,
-    })).filter((item: AnyMap) => item.id);
-    patchState({ connected: true, rooms, roomCount: rooms.length, lastRoomSyncAt: new Date().toISOString() });
-    return rooms.length;
-  } catch (error) {
-    console.error('[ROOM-SYNC]', error instanceof Error ? error.message : String(error));
-    patchState({ connected: Boolean(client.connected), roomSyncError: String(error) });
-    return 0;
-  }
-}
-
-async function main(): Promise<void> {
-  if (!existsSync(AUTH_PATH)) throw new Error(`인증 세션이 없습니다: ${AUTH_PATH}`);
-
-  const client: any = createClient({
-    authPath: AUTH_PATH,
-    autoConnect: false,
-    autoReconnect: true,
-    reconnectMinDelayMs: 1000,
-    reconnectMaxDelayMs: 30000,
-    pingIntervalMs: 60000,
-    socketKeepAliveMs: 30000,
-    memberRefreshIntervalMs: 60000,
-    memberLookupTimeoutMs: 3000,
-    sendIntervalMs: 400,
-    debug: process.env.LOCO_DEBUG === '1',
-  });
-
-  const mark = (connected: boolean, extra: AnyMap = {}) => {
-    patchState({
-      connected,
-      transport: client.transport || null,
-      userId: String(client.userId || ''),
-      developerId: getDeveloperId(client),
-      heartbeatAt: new Date().toISOString(),
-      ...extra,
-    });
-  };
-
-  client.on('connected', () => {
-    console.log('[LOCO] Carriage connected');
-    mark(true, { lastConnectedAt: new Date().toISOString(), error: null });
-  });
-
-  client.on('disconnected', () => {
-    console.warn('[LOCO] Carriage disconnected; KakaoForge auto-reconnect remains active');
-    mark(false, { lastDisconnectedAt: new Date().toISOString() });
-  });
-
-  client.on('kickout', (payload: any) => {
-    console.error('[LOCO] KICKOUT', JSON.stringify(payload));
-    mark(false, { kickout: payload });
-  });
-
-  client.on('error', (error: any) => {
-    console.error('[LOCO] client error:', error instanceof Error ? error.stack || error.message : String(error));
-    mark(Boolean(client.connected), { error: String(error) });
-  });
-
-  client.onReady(async () => {
-    console.log(`[LOCO] READY userId=${client.userId} transport=${client.transport || 'unknown'}`);
-    mark(true, { readyAt: new Date().toISOString() });
-    await syncRooms(client);
-  });
-
-  client.onMessage(async (chat: any, msg: any) => {
-    const roomId = roomIdOf(chat, msg);
-    if (!roomId) return;
-    const state = commandState();
-    const room = getRoomState(state, roomId);
-    const senderId = String(msg?.sender?.id ?? '');
-    if (senderId && senderId !== String(client.userId)) {
-      room.users[senderId] ??= { nickname: '', messages: 0, points: 0, joined: true };
-      room.users[senderId].nickname = String(msg?.sender?.name ?? room.users[senderId].nickname ?? '');
-    }
-    recordMessage(msg?.room ?? chat, msg, room);
-    saveCommandState(state);
-
-    if (verifyRoomCode(client, chat, msg)) {
-      try { await chat.sendText(roomId, '✅ 방 등록 완료! 이제 이 방에서 봇 기능을 사용할 수 있습니다.'); } catch {}
-      return;
-    }
-
-    await handleCommand(client, chat, msg);
-  });
-
-  client.onJoin((event: any) => {
-    const item = appendMemberEvent('JOIN', event);
-    if (item) console.log(`[JOIN] ${item.roomId} ${item.nickname} (${item.userId})`);
-  });
-
-  client.onLeave((event: any) => {
-    const item = appendMemberEvent('LEAVE', event);
-    if (item) console.log(`[LEAVE] ${item.roomId} ${item.nickname} (${item.userId})`);
-  });
-
-  client.onKick((event: any) => {
-    const item = appendMemberEvent('KICK', event);
-    if (item) console.log(`[KICK] ${item.roomId} ${item.nickname} (${item.userId})`);
-  });
-
-  await client.connect();
-  await syncRooms(client);
-
-  const roomTimer = setInterval(() => { void syncRooms(client); }, ROOM_SYNC_MS);
-  const heartbeat = setInterval(() => {
-    mark(Boolean(client.connected), { runtime: 'openchat', pid: process.pid });
-  }, HEARTBEAT_MS);
-
-  const shutdown = () => {
-    clearInterval(roomTimer);
-    clearInterval(heartbeat);
-    try { client.disconnect(); } catch {}
-    mark(false, { stoppedAt: new Date().toISOString() });
-  };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
-
-  console.log('[LOCO] OpenChat runtime is running.');
-  await new Promise<void>(() => undefined);
-}
-
-main().catch((error) => {
-  console.error('[FATAL] OpenChat runtime:', error instanceof Error ? error.stack || error.message : String(error));
-  patchState({ connected: false, runtime: 'openchat', fatalError: String(error), fatalAt: new Date().toISOString() });
-  process.exitCode = 1;
-});
+main().catch(e => { console.error('[FATAL] OpenChat runtime:', e instanceof Error ? e.stack || e.message : String(e)); const s = load(STATE); save(STATE, { ...s, connected: false, runtime: 'openchat', fatalError: String(e), fatalAt: new Date().toISOString() }); process.exitCode = 1; });
