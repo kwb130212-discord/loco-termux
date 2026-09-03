@@ -37,18 +37,24 @@ function ensureRoomState(state: Record<string, any>, roomId: string) {
 
 function commandHelp() {
   return [
-    '📋 LOCO-TERMUX 명령어',
+    '[!] 디노봇 명령어',
+    '',
+    '📌 기본 명령어',
     '!핑 - 봇 응답 확인',
     '!명령어 - 명령어 목록',
     '!echo <내용> - 내용 출력',
+    '!봇정보 - 연결/방 정보',
+    '',
+    '📊 채팅/관리',
     '!채팅순위 - 현재 수집된 메시지 기준 순위',
     '!입퇴장로그 - 최근 입장/퇴장 이벤트',
-    '!봇정보 - 연결/방 정보',
     '!봇등록 - 현재 방 8자리 등록코드 발급',
     '!방등록해제 - 현재 방 등록 해제',
+    '!kick @유저멘션 - Open Chat 관리자/방장만 사용',
+    '',
+    '🎰 게임',
     '!도박가입 - 1000 포인트로 시작',
     '!도박 <포인트> - 50% 확률, 성공 시 3배',
-    '!kick @유저멘션 - Open Chat 관리자/방장만 사용',
   ].join('\n');
 }
 
@@ -66,9 +72,6 @@ function recentEvents(limit = 10): any[] {
 }
 
 function extractMentionTarget(msg: any, rawArg: string): { id: string; name?: string } | null {
-  // KakaoForge/message wrappers can expose mentions in different fields.
-  // Prefer structured mention IDs; only fall back to a previously observed user
-  // with the exact nickname. Never guess an arbitrary numeric ID.
   const mentions = [
     msg?.message?.mentions,
     msg?.message?.mention,
@@ -302,27 +305,33 @@ async function main() {
       roomState.users[uid].nickname = event.nickname;
       roomState.users[uid].messages = Number(roomState.users[uid].messages ?? 0) + 1;
       saveCommandState(state);
-      await handleCommand(client, chat, msg);
     }
-    if (process.env.LOCO_DEBUG === '1') console.log(`[MSG] [${event.roomName}] ${event.nickname}: ${event.text}`);
+    await handleCommand(client, chat, msg);
   });
 
-  client.onJoin?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'JOIN', at: new Date().toISOString(), raw: event } }));
-  client.onLeave?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'LEAVE', at: new Date().toISOString(), raw: event } }));
-  client.onKick?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'KICK', at: new Date().toISOString(), raw: event } }));
-  client.on('error', (error: unknown) => {
-    console.error('[LOCO] client error:', error instanceof Error ? error.message : String(error));
+  client.onJoin((event: any) => {
+    saveState({ lastMemberEvent: { type: 'JOIN', at: new Date().toISOString(), ...event } });
+  });
+  client.onLeave((event: any) => {
+    saveState({ lastMemberEvent: { type: 'LEAVE', at: new Date().toISOString(), ...event } });
+  });
+  client.onKick((event: any) => {
+    saveState({ lastMemberEvent: { type: 'KICK', at: new Date().toISOString(), ...event } });
+  });
+
+  try {
+    await client.connect();
+    saveState({ connected: true, startedAt: new Date().toISOString() });
+  } catch (error) {
     saveState({ connected: false, error: String(error) });
-  });
+    throw error;
+  }
 
-  await client.connect();
-  saveState({ connected: true, transport: 'KakaoForge/LOCO' });
-  console.log('[LOCO] 실시간 연결 유지 중. 종료하려면 Ctrl+C.');
-  await new Promise<void>(() => {});
+  await new Promise(() => {});
 }
 
 main().catch((error) => {
-  console.error('[LOCO:FATAL]', error instanceof Error ? error.stack || error.message : String(error));
+  console.error('[LOCO] fatal:', error instanceof Error ? error.stack || error.message : String(error));
   saveState({ connected: false, fatal: String(error) });
   process.exitCode = 1;
 });
