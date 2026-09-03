@@ -150,7 +150,7 @@ function roomItems(result: any): RoomRef[] {
   })).filter((item: RoomRef) => item.id && item.name);
 }
 
-/** The application uses room_name as its canonical room reference. */
+/** The application uses room_name as a human-friendly room reference, while callbacks preserve the raw room_id. */
 function wrapRoomNameRuntime(client: any): any {
   const originalGetChatRooms = typeof client.getChatRooms === 'function' ? client.getChatRooms.bind(client) : null;
   const byName = new Map<string, string>();
@@ -195,7 +195,9 @@ function wrapRoomNameRuntime(client: any): any {
     if (!chat || typeof chat !== 'object') return chat;
     return new Proxy(chat, {
       get(target, prop, receiver) {
-        if (prop === 'id' || prop === 'chatId') return forcedName || byId.get(String(target.id ?? target.chatId ?? '')) || target[prop as keyof typeof target];
+        // Keep .id/.chatId as the real room identifier. sendText/openChatKick still accept room names.
+        if (prop === 'id' || prop === 'chatId') return String(target.id ?? target.chatId ?? '');
+        if (prop === 'name' || prop === 'roomName' || prop === 'title') return forcedName || byId.get(String(target.id ?? target.chatId ?? '')) || target[prop as keyof typeof target];
         if (prop === 'sendText' && typeof target.sendText === 'function') {
           return async (roomRef: any, ...args: any[]) => target.sendText.call(target, await resolveId(roomRef), ...args);
         }
@@ -208,12 +210,16 @@ function wrapRoomNameRuntime(client: any): any {
   };
 
   const adaptMessage = async (msg: any, chat: any): Promise<{ chat: any; msg: any }> => {
-    const rawId = String(msg?.room?.id ?? msg?.chatId ?? chat?.id ?? chat?.chatId ?? '');
+    const rawId = String(msg?.room?.id ?? msg?.room?.chatId ?? msg?.roomId ?? msg?.chatId ?? chat?.id ?? chat?.chatId ?? '');
     const name = await resolveName(rawId);
     const mappedChat = adaptChat(chat, name);
-    const mappedMsg = msg && typeof msg === 'object' ? { ...msg, chatId: name } : msg;
-    if (mappedMsg && mappedMsg.room && typeof mappedMsg.room === 'object') mappedMsg.room = adaptChat(mappedMsg.room, name);
-    else if (mappedMsg && name) mappedMsg.room = { id: name, name };
+    const mappedMsg = msg && typeof msg === 'object' ? { ...msg, chatId: rawId, roomId: rawId } : msg;
+    if (mappedMsg && mappedMsg.room && typeof mappedMsg.room === 'object') {
+      mappedMsg.room = adaptChat(mappedMsg.room, name);
+      try { mappedMsg.room.name = name; } catch {}
+    } else if (mappedMsg && name) {
+      mappedMsg.room = { id: rawId, chatId: rawId, name, roomName: name };
+    }
     return { chat: mappedChat, msg: mappedMsg };
   };
 
@@ -231,7 +237,7 @@ function wrapRoomNameRuntime(client: any): any {
   const wrapEvent = (handler: any) => async (event: any) => {
     const rawId = String(event?.roomId ?? event?.chatId ?? event?.room?.id ?? event?.chat?.id ?? '');
     const name = await resolveName(rawId);
-    const mapped = event && typeof event === 'object' ? { ...event, roomId: name, roomName: name } : event;
+    const mapped = event && typeof event === 'object' ? { ...event, roomId: rawId, chatId: rawId, roomName: name } : event;
     if (mapped?.room && typeof mapped.room === 'object') mapped.room = adaptChat(mapped.room, name);
     if (mapped?.chat && typeof mapped.chat === 'object') mapped.chat = adaptChat(mapped.chat, name);
     return handler(mapped);
