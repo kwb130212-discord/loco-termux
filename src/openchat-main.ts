@@ -92,7 +92,7 @@ async function send(chat: any, roomId: string | number, value: string): Promise<
   for (const part of chunks(value)) await chat.sendText(roomId, part);
 }
 
-function recordMemberEvent(type: EventKind, event: MemberEvent): void {
+function recordMemberEvent(type: EventKind, event: MemberEvent): State[] {
   const state = load(STATE);
   const history = Array.isArray(state.memberEvents) ? state.memberEvents : [];
   const ids = event.member?.ids ?? [];
@@ -105,7 +105,7 @@ function recordMemberEvent(type: EventKind, event: MemberEvent): void {
     userId: String(id),
     nickname: names[index] || names[0] || '알 수 없음',
   }));
-  if (!rows.length) return;
+  if (!rows.length) return [];
   history.push(...rows);
   save(STATE, {
     ...state,
@@ -113,6 +113,7 @@ function recordMemberEvent(type: EventKind, event: MemberEvent): void {
     lastMemberEvent: rows.at(-1),
     updatedAt: new Date().toISOString(),
   });
+  return rows;
 }
 
 function memberRows(roomId: string, type?: EventKind): State[] {
@@ -158,8 +159,48 @@ function targetFromReply(message: MessageEvent): { id: string; name: string } | 
   const reply = findReply(message);
   if (!reply) return null;
   const id = reply?.userId ?? reply?.memberId ?? reply?.sender?.id ?? reply?.author?.id;
-  if (id === undefined || id === null) return null;
-  return { id: String(id), name: String(reply?.nickname ?? reply?.name ?? reply?.sender?.name ?? reply?.author?.name ?? '') };
+  if (id !== undefined && id !== null && String(id) !== String(message.sender.id)) {
+    return { id: String(id), name: String(reply?.nickname ?? reply?.name ?? reply?.sender?.name ?? reply?.author?.name ?? '') };
+  }
+  return targetFromLeaveLogReply(message);
+}
+
+function replyTextCandidates(message: MessageEvent): string[] {
+  const reply = findReply(message);
+  if (!reply) return [];
+  const values = [
+    reply?.text,
+    reply?.message?.text,
+    reply?.content,
+    reply?.body,
+    reply?.quote?.text,
+    reply?.message?.message?.text,
+    reply?.replyTo?.text,
+  ];
+  return values.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+}
+
+function targetFromLeaveLogReply(message: MessageEvent): { id: string; name: string } | null {
+  const roomId = String(message.room.id);
+  const candidates = replyTextCandidates(message);
+  if (!candidates.length) return null;
+
+  const rows = memberRows(roomId, 'LEAVE').reverse();
+  for (const text of candidates) {
+    const idMatch = text.match(/(?:퇴장로그|퇴장|나감)[^\d]{0,120}(\d{3,})/i);
+    if (idMatch) {
+      const id = idMatch[1];
+      const row = rows.find((item) => String(item.userId) === id);
+      if (row) return { id: String(row.userId), name: String(row.nickname || '') };
+    }
+
+    const row = rows.find((item) => {
+      const name = String(item.nickname || '').trim();
+      return name && text.includes(name);
+    });
+    if (row) return { id: String(row.userId), name: String(row.nickname || '') };
+  }
+  return null;
 }
 
 function readInfo(value: unknown, depth = 0, seen = new Set<object>()): State | null {
@@ -217,8 +258,8 @@ function help(): string {
     '│ !핑  !명령어  !봇정보  !봇상태',
     '│ !관리자 @유저  !관리자해제 @유저  !관리자목록',
     '│ !입장로그  !퇴장로그  !입퇴장로그',
-    '│ !나간사람  !나간사람내보내기  !읽은사람  !채팅순위',
-    '│ !kick @유저 또는 답장 후 !kick',
+    '│ !나간사람  !읽은사람  !채팅순위',
+    '│ !kick @유저 또는 대상 퇴장로그에 답장 후 !kick',
     '│ !allkick',
     '│ !봇등록  !방등록해제',
     '│ !도박가입  !도박 <포인트>',
@@ -270,7 +311,7 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
     }
     case '!관리자목록':
       if (!admin) return reply('🔒 권한이 없습니다.');
-      return reply(Object.values(room.admins).length ? ['🛡️ 관리자 전체보기', ...Object.values(room.admins).map((x: any, i) => `${i + 1}. ${x.name || x.id}`)].join('\n') : '🛡️ 등록된 관리자가 없습니다.');
+      return reply(Object.values(room.admins).length ? ['🛡️ 관리자 전체보기', ...Object.values(room.admins).map((x: any, i: number) => `${i + 1}. ${x.name || x.id}`)].join('\n') : '🛡️ 등록된 관리자가 없습니다.');
     case '!입장로그':
     case '!퇴장로그':
     case '!입퇴장로그': {
@@ -284,17 +325,6 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
       if (!admin) return reply('🔒 권한이 없습니다.');
       const rows = departed(roomId);
       return reply(rows.length ? ['🚪 나간 사람 전체보기', ...rows.map((x, i) => `${i + 1}. ${x.nickname} (${x.userId}) · ${fmt(x.at)}`)].join('\n') : '🚪 나간 사람 기록이 없습니다.');
-    }
-    case '!나간사람내보내기': {
-      if (!admin) return reply('🔒 권한이 없습니다.');
-      const rows = departed(roomId);
-      if (!rows.length) return reply('🚪 내보낼 기록이 없습니다.');
-      let ok = 0;
-      for (const row of rows) {
-        if (!/^\d+$/.test(row.userId) || row.userId === String(client.userId)) continue;
-        try { await chat.openChatKick(message.room.id, Number(row.userId)); ok++; } catch {}
-      }
-      return reply(`🚪 내보내기 요청: ${ok}/${rows.length}명`);
     }
     case '!읽은사람': {
       if (!admin) return reply('🔒 권한이 없습니다.');
@@ -311,7 +341,7 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
     case '!kick': {
       if (!admin) return reply('🔒 권한이 없습니다.');
       const target = findMention(message) || targetFromReply(message);
-      if (!target) return reply('사용법: !kick @유저 또는 대상 메시지에 답장 후 !kick');
+      if (!target) return reply('사용법: !kick @유저 또는 퇴장로그에 답장 후 !kick');
       return kick(chat, roomId, target, reply);
     }
     case '!allkick': {
@@ -360,6 +390,16 @@ async function handleCommand(client: KakaoForgeClient, chat: any, message: Messa
   }
 }
 
+async function sendLeaveLogs(chat: any, event: MemberEvent, rows: State[]): Promise<void> {
+  for (const row of rows) {
+    try {
+      await send(chat, event.room.id, `📤 퇴장로그\n${row.nickname} (${row.userId})\n${fmt(row.at)}\n↩️ 이 메시지에 답장 후 !kick`);
+    } catch (error) {
+      console.error('[KakaoForge][leave-log]', error instanceof Error ? error.message : String(error));
+    }
+  }
+}
+
 async function main(): Promise<void> {
   if (!existsSync(AUTH)) throw new Error(`QR 로그인이 필요합니다: ${AUTH}`);
 
@@ -394,8 +434,9 @@ async function main(): Promise<void> {
     recordMemberEvent('JOIN', event);
   });
 
-  client.onLeave((_chat, event) => {
-    recordMemberEvent('LEAVE', event);
+  client.onLeave(async (chat, event) => {
+    const rows = recordMemberEvent('LEAVE', event);
+    if (rows.length) await sendLeaveLogs(chat, event, rows);
   });
 
   client.onKick((_chat, event) => {
