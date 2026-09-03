@@ -1,10 +1,10 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
 # LOCO-Termux self-healing launcher
-# - keeps the control center alive
-# - retries dependency installation/builds
-# - restarts after crashes, including clean exits
-# - never silently gives up while Termux is running
+# - always rebuilds when TypeScript sources are newer than dist
+# - repairs npm dependencies when needed
+# - restarts the control center after crashes/clean exits
+# - keeps retrying preparation failures while Termux is alive
 
 cd "$(dirname "$0")" || exit 1
 
@@ -25,6 +25,11 @@ bootstrap_tools() {
     pkg install -y nodejs || return 1
   fi
 
+  if ! command -v npm >/dev/null 2>&1; then
+    log "npm 없음 → Node.js 재설치 시도"
+    pkg install -y nodejs || return 1
+  fi
+
   if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
     log "Python 없음 → 설치 시도"
     pkg install -y python || return 1
@@ -36,16 +41,33 @@ bootstrap_tools() {
 prepare() {
   bootstrap_tools || return 1
 
-  if [ ! -d node_modules ] || [ ! -f node_modules/.package-lock.json ]; then
+  if [ ! -f package-lock.json ] || [ ! -d node_modules ]; then
     log "의존성 설치/복구 중..."
+    npm install || return 1
+  elif [ ! -f node_modules/.package-lock.json ]; then
+    log "node_modules 상태 확인/복구 중..."
     npm install || return 1
   fi
 
+  # 소스가 dist보다 새로우면 반드시 재빌드합니다.
+  # 이전에는 dist가 존재하기만 하면 오래된 빌드를 실행할 수 있었습니다.
+  local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
-    log "빌드 산출물 없음 → 빌드 중..."
+    rebuild=1
+  elif find src -type f -name '*.ts' -newer dist/termux-panel.js | grep -q .; then
+    rebuild=1
+  elif [ -f package.json ] && [ package.json -nt dist/termux-panel.js ]; then
+    rebuild=1
+  elif [ -f tsconfig.json ] && [ tsconfig.json -nt dist/termux-panel.js ]; then
+    rebuild=1
+  fi
+
+  if [ "$rebuild" -eq 1 ]; then
+    log "최신 소스 감지 → TypeScript 전체 빌드"
     npm run build || return 1
   fi
 
+  [ -f dist/termux-panel.js ] || return 1
   return 0
 }
 
@@ -62,7 +84,6 @@ while true; do
   node dist/termux-panel.js
   code=$?
 
-  # 정상 종료도 서비스 재시작으로 처리해 실수로 종료되어도 다시 올라옵니다.
   log "Control Center 종료(code=$code) — 2초 후 자동 재시작"
   sleep 2
 done
