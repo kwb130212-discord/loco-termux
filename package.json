@@ -3,10 +3,12 @@
   "version": "1.6.2",
   "private": true,
   "description": "Termux Android LOCO bridge with a source-compatible KakaoForge transport and analyzer state layer",
-  "main": "dist/bridge-main.js",
+  "main": "dist/termux-panel.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/bridge-main.js",
+    "start": "node dist/termux-panel.js",
+    "start:panel": "node dist/termux-panel.js",
+    "start:core": "node dist/bridge-main.js",
     "start:safe": "bash 실행.sh",
     "start:loco": "node dist/index.js",
     "start:openchat": "node dist/openchat-main.js",
@@ -24,9 +26,7 @@
     "room:departed-export": "python3 방관리_cli.py departed-export",
     "dev": "tsx src/index.ts"
   },
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "dependencies": {
     "dotenv": "^16.4.7",
     "kakaoforge": "git+https://github.com/minjaemin2020/KakaoForge.git#4b774ea40b1347280fadb685415436584093118b",
