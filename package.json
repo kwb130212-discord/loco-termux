@@ -1,6 +1,6 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "private": true,
   "description": "Termux Android LOCO bridge with KakaoForge transport and analyzer state layer",
   "main": "dist/bridge-main.js",
@@ -12,6 +12,7 @@
     "start:openchat": "node dist/openchat-main.js",
     "openchat:qr": "node dist/qr-login.js",
     "login:qr": "node dist/qr-login.js",
+    "login:loco": "node dist/qr-login.js",
     "rooms": "python3 방관리_cli.py rooms",
     "room:add": "python3 방관리_cli.py add",
     "room:enable": "python3 방관리_cli.py enable",
@@ -23,7 +24,9 @@
     "room:departed-export": "python3 방관리_cli.py departed-export",
     "dev": "tsx src/index.ts"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "kakaoforge": "^1.0.3"
