@@ -8,19 +8,43 @@ const AUTH_PATH = join(DATA_DIR, 'kakaoforge-auth.json');
 const STATE_PATH = join(DATA_DIR, 'loco-transport.json');
 const COMMAND_STATE_PATH = join(DATA_DIR, 'command-state.json');
 
+function loadJson(path: string): Record<string, any> {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'));
+    return value && typeof value === 'object' ? value : {};
+  } catch { return {}; }
+}
+
 function saveState(patch: Record<string, unknown>) {
   mkdirSync(DATA_DIR, { recursive: true });
-  let state: Record<string, unknown> = {};
-  try { state = JSON.parse(readFileSync(STATE_PATH, 'utf8')); } catch {}
-  state = { ...state, ...patch, updatedAt: new Date().toISOString() };
+  const state = loadJson(STATE_PATH);
+  const merged = { ...state, ...patch, updatedAt: new Date().toISOString() };
+  writeFileSync(STATE_PATH, JSON.stringify(merged, null, 2), 'utf8');
+}
+
+function appendMemberEvent(type: 'JOIN' | 'LEAVE' | 'KICK', event: any) {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const state = loadJson(STATE_PATH);
+  const history = Array.isArray(state.memberEvents) ? state.memberEvents : [];
+  const item = {
+    type,
+    at: new Date().toISOString(),
+    roomId: String(event?.roomId ?? event?.chatId ?? event?.room?.id ?? event?.chat?.id ?? ''),
+    roomName: String(event?.roomName ?? event?.room?.name ?? event?.chat?.name ?? ''),
+    userId: String(event?.userId ?? event?.memberId ?? event?.sender?.id ?? event?.member?.id ?? ''),
+    nickname: String(event?.nickname ?? event?.name ?? event?.member?.name ?? event?.sender?.name ?? '알 수 없음'),
+    raw: event,
+  };
+  history.push(item);
+  state.memberEvents = history.slice(-500);
+  state.lastMemberEvent = item;
+  state.updatedAt = new Date().toISOString();
   writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  return item;
 }
 
 function loadCommandState(): Record<string, any> {
-  try {
-    const value = JSON.parse(readFileSync(COMMAND_STATE_PATH, 'utf8'));
-    return value && typeof value === 'object' ? value : {};
-  } catch { return {}; }
+  return loadJson(COMMAND_STATE_PATH);
 }
 
 function saveCommandState(state: Record<string, any>) {
@@ -47,7 +71,7 @@ function commandHelp() {
     '',
     '📊 채팅/관리',
     '!채팅순위 - 현재 수집된 메시지 기준 순위',
-    '!입퇴장로그 - 최근 입장/퇴장 이벤트',
+    '!입퇴장로그 - 과거 입장/퇴장 전체 기록',
     '!봇등록 - 현재 방 8자리 등록코드 발급',
     '!방등록해제 - 현재 방 등록 해제',
     '!kick @유저멘션 - Open Chat 관리자/방장만 사용',
@@ -63,12 +87,16 @@ function isManager(client: any): boolean {
   return type === 1 || type === 4;
 }
 
-function recentEvents(limit = 10): any[] {
-  try {
-    const raw = JSON.parse(readFileSync(join(process.cwd(), 'loco_analyzer.json'), 'utf8'));
-    const events = Array.isArray(raw?.events) ? raw.events : [];
-    return events.filter((e: any) => ['JOIN', 'LEAVE'].includes(String(e?.event ?? e?.type ?? '').toUpperCase())).slice(-limit).reverse();
-  } catch { return []; }
+function formatTime(value: any): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value ?? '');
+  return date.toLocaleString('ko-KR', { hour12: false });
+}
+
+function memberEventHistory(limit = 500): any[] {
+  const state = loadJson(STATE_PATH);
+  const events = Array.isArray(state.memberEvents) ? state.memberEvents : [];
+  return events.slice(-limit).reverse();
 }
 
 function extractMentionTarget(msg: any, rawArg: string): { id: string; name?: string } | null {
@@ -89,20 +117,33 @@ function extractMentionTarget(msg: any, rawArg: string): { id: string; name?: st
       return { id: String(id), name: name != null ? String(name) : undefined };
     }
   }
-
-  const text = String(msg?.message?.text ?? '');
-  const atIndex = text.indexOf('@');
-  if (atIndex >= 0) {
-    const candidate = text.slice(atIndex + 1).trim().split(/\s+/)[0];
-    if (candidate && candidate === normalizedName) {
-      for (const mention of mentions) {
-        const id = mention?.userId ?? mention?.id ?? mention?.memberId ?? mention?.user?.id;
-        if (id != null) return { id: String(id), name: candidate };
-      }
-    }
-  }
-
   return null;
+}
+
+async function sendToRoom(client: any, roomId: string, body: string) {
+  if (!roomId) return false;
+  try {
+    const result = await client.getChatRooms();
+    const rooms = Array.isArray(result?.chats) ? result.chats : (Array.isArray(result) ? result : []);
+    const target = rooms.find((room: any) => String(room?.id ?? room?.chatId ?? room?.c ?? '') === roomId);
+    if (target?.sendText) {
+      await target.sendText(roomId, body);
+      return true;
+    }
+  } catch (error) {
+    console.error('[EVENT] room send failed:', error instanceof Error ? error.message : String(error));
+  }
+  return false;
+}
+
+async function announceMemberEvent(client: any, type: 'JOIN' | 'LEAVE', event: any) {
+  const item = appendMemberEvent(type, event);
+  const roomId = item.roomId;
+  const nickname = item.nickname || '알 수 없음';
+  const body = type === 'JOIN'
+    ? `[!] @${nickname}님 환영합니다\n명령어는 !명령어`
+    : `[!] ${nickname}님이 나가셨습니다. ${formatTime(item.at)}\n내보내실려면 답장으로 kick 입력해주세요`;
+  await sendToRoom(client, roomId, body);
 }
 
 async function handleCommand(client: any, chat: any, msg: any) {
@@ -110,7 +151,7 @@ async function handleCommand(client: any, chat: any, msg: any) {
   if (!text.startsWith('!')) return;
   if (String(msg?.sender?.id) === String(client?.userId)) return;
 
-  const roomId = String(msg?.room?.id ?? '');
+  const roomId = String(msg?.room?.id ?? chat?.id ?? '');
   if (!roomId) return;
   const parts = text.split(/\s+/);
   const command = parts[0].toLowerCase();
@@ -131,21 +172,17 @@ async function handleCommand(client: any, chat: any, msg: any) {
       case '!ping':
         await send('🏓 pong!');
         break;
-
       case '!명령어':
       case '!help':
         await send(commandHelp());
         break;
-
       case '!echo':
         await send(args.length ? args.join(' ') : '사용법: !echo <내용>');
         break;
-
       case '!봇정보':
       case '!info':
         await send(`🤖 LOCO-Termux\n전송: KakaoForge/LOCO\n방: ${String(msg.room?.name ?? roomId)}\nOpen Chat: ${msg.room?.isOpenChat === true ? 'YES' : 'NO'}\n등록: ${room.registered ? 'YES' : 'NO'}`);
         break;
-
       case '!채팅순위': {
         const rows = Object.values(room.users as Record<string, any>)
           .sort((a: any, b: any) => Number(b.messages ?? 0) - Number(a.messages ?? 0))
@@ -155,15 +192,13 @@ async function handleCommand(client: any, chat: any, msg: any) {
           : '아직 수집된 채팅 데이터가 없습니다.');
         break;
       }
-
       case '!입퇴장로그': {
-        const events = recentEvents(10);
+        const events = memberEventHistory(500).filter((e: any) => e.type === 'JOIN' || e.type === 'LEAVE');
         await send(events.length
-          ? ['📜 최근 입퇴장 로그', ...events.map((e: any) => `${String(e.event ?? e.type ?? '').toUpperCase()} | ${e.nickname ?? ''} | ${e.at ?? ''}`)].join('\n')
+          ? ['📜 과거 입퇴장로그', ...events.map((e: any) => `${e.type === 'JOIN' ? '[입장]' : '[퇴장]'} ${e.nickname} | ${formatTime(e.at)}`)].join('\n')
           : '수집된 입퇴장 로그가 없습니다.');
         break;
       }
-
       case '!봇등록': {
         if (!isManager(client)) { await send('❌ 봇 등록은 Open Chat 방장/관리자만 사용할 수 있습니다.'); break; }
         const now = Date.now();
@@ -179,7 +214,6 @@ async function handleCommand(client: any, chat: any, msg: any) {
         await send(`🔐 방 등록코드: ${code}\n5분 이내 Termux 패널에서 등록을 완료하세요.`);
         break;
       }
-
       case '!방등록해제':
         if (!isManager(client)) { await send('❌ 방 등록 해제는 Open Chat 방장/관리자만 사용할 수 있습니다.'); break; }
         room.registered = false;
@@ -188,7 +222,6 @@ async function handleCommand(client: any, chat: any, msg: any) {
         saveCommandState(state);
         await send('✅ 현재 방의 봇 등록을 해제했습니다.');
         break;
-
       case '!도박가입':
         if (room.users[userId].joined) {
           await send(`이미 가입되어 있습니다. 잔액: ${Number(room.users[userId].points ?? 0).toLocaleString()}P`);
@@ -199,7 +232,6 @@ async function handleCommand(client: any, chat: any, msg: any) {
         saveCommandState(state);
         await send(`🎰 ${room.users[userId].nickname}님 가입 완료! 시작 잔액: 1,000P`);
         break;
-
       case '!도박': {
         if (!room.users[userId].joined) { await send('먼저 !도박가입 을 입력하세요.'); break; }
         const amount = Number(args[0]);
@@ -216,7 +248,6 @@ async function handleCommand(client: any, chat: any, msg: any) {
         saveCommandState(state);
         break;
       }
-
       case '!kick': {
         if (!msg.room?.isOpenChat) { await send('❌ !kick은 Open Chat에서만 사용할 수 있습니다.'); break; }
         if (!isManager(client)) { await send('❌ 봇이 Open Chat 방장/관리자가 아닙니다.'); break; }
@@ -238,7 +269,6 @@ async function handleCommand(client: any, chat: any, msg: any) {
         await send(`✅ ${target.name ? `@${target.name}` : `사용자 ${target.id}`} 내보내기 요청을 전송했습니다.`);
         break;
       }
-
       default:
         return;
     }
@@ -309,15 +339,9 @@ async function main() {
     await handleCommand(client, chat, msg);
   });
 
-  client.onJoin((event: any) => {
-    saveState({ lastMemberEvent: { type: 'JOIN', at: new Date().toISOString(), ...event } });
-  });
-  client.onLeave((event: any) => {
-    saveState({ lastMemberEvent: { type: 'LEAVE', at: new Date().toISOString(), ...event } });
-  });
-  client.onKick((event: any) => {
-    saveState({ lastMemberEvent: { type: 'KICK', at: new Date().toISOString(), ...event } });
-  });
+  client.onJoin((event: any) => { void announceMemberEvent(client, 'JOIN', event); });
+  client.onLeave((event: any) => { void announceMemberEvent(client, 'LEAVE', event); });
+  client.onKick((event: any) => { appendMemberEvent('KICK', event); });
 
   try {
     await client.connect();
@@ -331,7 +355,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('[LOCO] fatal:', error instanceof Error ? error.stack || error.message : String(error));
-  saveState({ connected: false, fatal: String(error) });
+  console.error('[FATAL]', error instanceof Error ? error.stack || error.message : String(error));
   process.exitCode = 1;
 });
