@@ -2,17 +2,13 @@ import { mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import { createAuthByQR, createClient } from './kakaoforge-loader';
-import type { AuthPayload } from './kakaoforge-loader';
+import { createAuthByQR, createClient, type AuthPayload } from 'kakaoforge';
 import qrcode from 'qrcode-terminal';
 
 const DATA_DIR = join(homedir(), '.loco-termux');
-// Use the same persistent auth file as the OpenChat runtime.
-// Keeping these paths identical prevents a successful QR login from appearing
-// to be lost when the QR helper process exits.
 const AUTH_PATH = join(DATA_DIR, 'kakaoforge-auth.json');
 
-export type LocoQrLoginResult = AuthPayload & { client: any };
+export type LocoQrLoginResult = AuthPayload & { client: ReturnType<typeof createClient> };
 
 const T = {
   reset: '\x1b[0m', cyan: '\x1b[36m', blue: '\x1b[34m', green: '\x1b[32m',
@@ -26,97 +22,78 @@ function ensureSecureDataDir(): void {
 
 function line(char = '─', width = 52): string { return char.repeat(width); }
 
-function printHeader(): void {
+function header(): void {
   console.clear();
   console.log(`${T.cyan}${T.bold}╭${line()}╮${T.reset}`);
-  console.log(`${T.cyan}${T.bold}│${T.reset} ${T.bold}LOCO-TERMUX${T.reset}  ${T.dim}SECURE LOGIN PANEL${T.reset}             ${T.cyan}${T.bold}│${T.reset}`);
-  console.log(`${T.cyan}${T.bold}│${T.reset} ${T.dim}KakaoForge QR Authentication${T.reset}                  ${T.cyan}${T.bold}│${T.reset}`);
-  console.log(`${T.cyan}${T.bold}╰${line()}╯${T.reset}`);
-  console.log('');
+  console.log(`${T.cyan}${T.bold}│${T.reset} ${T.bold}LOCO-TERMUX${T.reset}  ${T.dim}KakaoForge QR LOGIN${T.reset}          ${T.cyan}${T.bold}│${T.reset}`);
+  console.log(`${T.cyan}${T.bold}╰${line()}╯${T.reset}\n`);
 }
 
-function printStatus(title: string, message: string, color = T.cyan): void {
+function status(title: string, message: string, color = T.cyan): void {
   console.log(`${color}${T.bold}┌─ ${title}${T.reset}`);
   console.log(`${T.dim}│${T.reset} ${message}`);
   console.log(`${T.dim}└${T.reset}`);
 }
 
-function createQrDeviceUuid(): string {
-  const seed = `${randomUUID()}-${Date.now()}`;
-  return createHash('sha256').update(seed, 'utf8').digest('hex');
+function deviceUuid(): string {
+  return createHash('sha256').update(`${randomUUID()}-${Date.now()}`, 'utf8').digest('hex');
 }
 
 export async function loginLocoByQR(options: {
-  deviceUuid?: string; deviceName?: string; modelName?: string; forced?: boolean;
-  checkAllowlist?: boolean; enforceAllowlist?: boolean; appVer?: string;
+  deviceUuid?: string;
+  deviceName?: string;
+  modelName?: string;
+  forced?: boolean;
+  checkAllowlist?: boolean;
+  enforceAllowlist?: boolean;
+  appVer?: string;
 } = {}): Promise<LocoQrLoginResult> {
   ensureSecureDataDir();
-  printHeader();
-  const qrDeviceUuid = options.deviceUuid || createQrDeviceUuid();
+  header();
+  const uuid = options.deviceUuid || deviceUuid();
 
-  printStatus('AUTHENTICATION', 'KakaoTalk QR 승인을 기다리는 중입니다.', T.blue);
-  console.log(`${T.dim}  • OAuth REST API Key / 비밀번호 입력 없음${T.reset}`);
-  console.log(`${T.dim}  • 본인 KakaoTalk 앱에서 직접 승인${T.reset}`);
-  console.log(`${T.dim}  • 이번 QR은 새 기기 세션으로 생성${T.reset}`);
-  console.log(`${T.dim}  • QR 요청을 반복하지 않고 서버 간격을 따름${T.reset}`);
+  status('AUTHENTICATION', 'KakaoForge의 공식 QR 인증 흐름을 시작합니다.', T.blue);
+  console.log(`${T.dim}• OAuth REST 로그인/비밀번호 입력 없음${T.reset}`);
+  console.log(`${T.dim}• KakaoTalk 앱에서 직접 QR 승인${T.reset}`);
   console.log('');
 
   const payload = await createAuthByQR({
     authPath: AUTH_PATH,
-    deviceUuid: qrDeviceUuid,
+    deviceUuid: uuid,
     deviceName: options.deviceName || 'LOCO-Termux',
-    modelName: options.modelName || 'SM-T733',
+    modelName: options.modelName || 'LOCO-Termux',
     forced: options.forced === true,
     checkAllowlist: options.checkAllowlist ?? true,
     enforceAllowlist: options.enforceAllowlist ?? false,
     appVer: options.appVer,
     save: true,
     onQrUrl: (url: string) => {
-      console.log('');
-      console.log(`${T.cyan}${T.bold}╔════════════════════════════════════════════════════════════╗${T.reset}`);
-      console.log(`${T.cyan}${T.bold}║${T.reset}              ${T.bold}KAKAOTALK QR LOGIN${T.reset}                     ${T.cyan}${T.bold}║${T.reset}`);
-      console.log(`${T.cyan}${T.bold}╠════════════════════════════════════════════════════════════╣${T.reset}`);
-      console.log(`${T.cyan}${T.bold}║${T.reset}  ${T.green}${T.bold}①${T.reset} KakaoTalk 앱 실행                                 ${T.cyan}${T.bold}║${T.reset}`);
-      console.log(`${T.cyan}${T.bold}║${T.reset}  ${T.green}${T.bold}②${T.reset} QR 로그인/기기 연결 메뉴 선택                     ${T.cyan}${T.bold}║${T.reset}`);
-      console.log(`${T.cyan}${T.bold}║${T.reset}  ${T.green}${T.bold}③${T.reset} 아래 QR 코드 스캔 → 승인                         ${T.cyan}${T.bold}║${T.reset}`);
-      console.log(`${T.cyan}${T.bold}╚════════════════════════════════════════════════════════════╝${T.reset}`);
-      console.log('');
-      console.log(`${T.yellow}${T.bold}                 ▼ QR CODE ▼${T.reset}`);
-      console.log('');
+      console.log(`${T.yellow}${T.bold}▼ KAKAOTALK QR CODE ▼${T.reset}\n`);
       qrcode.generate(url, { small: true });
-      console.log('');
-      console.log(`${T.dim}QR content:${T.reset} ${url}`);
-      console.log(`${T.yellow}${T.bold}※ QR은 서버가 지정한 시간에만 유효합니다.${T.reset}`);
-      console.log(`${T.dim}스캔 후 이 화면을 닫지 말고 승인 완료를 기다리세요.${T.reset}`);
-      console.log('');
+      console.log(`\n${T.dim}QR URL:${T.reset} ${url}`);
+      console.log(`${T.yellow}※ QR 만료 전 KakaoTalk에서 승인하세요.${T.reset}\n`);
     },
     onPasscode: (passcode: string) => {
-      printStatus('VERIFY CODE', `${T.bold}${passcode}${T.reset}  ← KakaoTalk에 표시된 코드와 대조하세요.`, T.yellow);
-      console.log(`${T.dim}※ 이 코드는 새 QR 세션의 확인용 코드입니다. 다른 QR의 코드를 입력하지 마세요.${T.reset}`);
+      status('VERIFY CODE', `${T.bold}${passcode}${T.reset}`, T.yellow);
     },
   });
 
   if (!payload.userId || !payload.accessToken || !payload.deviceUuid) {
-    throw new Error('QR 인증은 완료되었지만 LOCO 인증 정보가 완전하지 않습니다.');
+    throw new Error('KakaoForge QR 인증 결과에 필수 인증 정보가 없습니다.');
   }
 
-  console.log('');
-  printStatus('LOGIN SUCCESS', `userId=${payload.userId}`, T.green);
+  status('LOGIN SUCCESS', `userId=${payload.userId}`, T.green);
   console.log(`${T.dim}인증 파일:${T.reset} ${AUTH_PATH}`);
-  console.log(`${T.green}${T.bold}✓${T.reset} KakaoForge 클라이언트 연결 준비 완료`);
-  console.log('');
 
   const client = createClient({
-    userId: payload.userId,
-    oauthToken: payload.accessToken,
-    refreshToken: payload.refreshToken,
-    deviceUuid: payload.deviceUuid,
     authPath: AUTH_PATH,
     autoConnect: true,
+    autoReconnect: true,
+    debug: false,
   });
 
-  client.on?.('error', (error: unknown) => {
-    console.error(`${T.red}[LOCO]${T.reset}`, error instanceof Error ? error.message : String(error));
+  client.on('error', (error: unknown) => {
+    console.error(`${T.red}[KakaoForge]${T.reset}`, error instanceof Error ? error.message : String(error));
   });
 
   return { ...payload, client };
@@ -125,18 +102,14 @@ export async function loginLocoByQR(options: {
 async function main(): Promise<void> {
   try {
     const result = await loginLocoByQR();
-    console.log(`${T.cyan}${T.bold}╭${line()}╮${T.reset}`);
-    console.log(`${T.cyan}${T.bold}│${T.reset} ${T.green}${T.bold}READY${T.reset}  LOCO 인증 저장 완료. 런타임에서 연결하세요.`.padEnd(61) + `${T.cyan}${T.bold}│${T.reset}`);
-    console.log(`${T.cyan}${T.bold}╰${line()}╯${T.reset}`);
-    console.log(`${T.dim}인증 파일:${T.reset} ~/.loco-termux/kakaoforge-auth.json`);
-    console.log(`${T.dim}userId:${T.reset} ${result.userId}`);
-    console.log(`${T.green}✓ 다음 단계: OpenChat 런타임이 저장된 세션으로 연결됩니다.${T.reset}`);
-    console.log('');
+    console.log(`${T.green}${T.bold}✓ KakaoForge 인증 저장 완료${T.reset}`);
+    console.log(`userId: ${result.userId}`);
+    console.log(`auth: ${AUTH_PATH}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`${T.red}${T.bold}[FAIL]${T.reset} ${message}`);
     if (/이용|횟수|overused|too many|rate|limit/i.test(message)) {
-      console.error(`${T.yellow}[QR] Kakao 서버의 QR 사용 제한으로 보입니다. 새 QR을 연속 생성하지 말고 잠시 후 한 번만 다시 시도하세요.${T.reset}`);
+      console.error(`${T.yellow}[QR] 서버 사용 제한으로 보입니다. QR을 연속 생성하지 말고 잠시 후 다시 시도하세요.${T.reset}`);
     }
     process.exitCode = 1;
   }
