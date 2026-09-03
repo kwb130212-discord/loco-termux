@@ -35,6 +35,22 @@ export interface KakaoForgeModule {
   createClient(config?: Record<string, unknown>): any;
 }
 
+// Process-level guard: unexpected library errors are recorded instead of silently
+// killing the session. The outer 실행.sh supervisor remains the final recovery layer.
+let processGuardInstalled = false;
+function installProcessGuard(): void {
+  if (processGuardInstalled) return;
+  processGuardInstalled = true;
+
+  process.on('uncaughtException', (error) => {
+    console.error('[FAILSAFE][uncaughtException]', error instanceof Error ? error.stack || error.message : String(error));
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    console.error('[FAILSAFE][unhandledRejection]', reason instanceof Error ? reason.stack || reason.message : String(reason));
+  });
+}
+
 function resolvePackageRoot(): string {
   let dir = process.cwd();
   while (true) {
@@ -138,6 +154,7 @@ function buildKakaoForge(packageRoot: string): void {
 }
 
 function loadModule(): KakaoForgeModule {
+  installProcessGuard();
   const packageRoot = resolvePackageRoot();
   buildKakaoForge(packageRoot);
   const require = createRequire(join(packageRoot, 'package.json'));
@@ -149,14 +166,27 @@ export function getKakaoForge(): KakaoForgeModule {
 }
 
 export async function createAuthByQR(options?: CreateAuthByQROptions): Promise<AuthPayload> {
-  return loadModule().createAuthByQR(options);
+  installProcessGuard();
+  try {
+    return await loadModule().createAuthByQR(options);
+  } catch (error) {
+    console.error('[FAILSAFE][QR]', error instanceof Error ? error.stack || error.message : String(error));
+    throw error;
+  }
 }
 
 export function createClient(config?: Record<string, unknown>): any {
-  return loadModule().createClient(config);
+  installProcessGuard();
+  try {
+    return loadModule().createClient(config);
+  } catch (error) {
+    console.error('[FAILSAFE][CLIENT]', error instanceof Error ? error.stack || error.message : String(error));
+    throw error;
+  }
 }
 
 export function ensureKakaoForgeInstalled(): void {
+  installProcessGuard();
   const packageRoot = resolvePackageRoot();
   buildKakaoForge(packageRoot);
 }
