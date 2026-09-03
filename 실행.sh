@@ -2,12 +2,11 @@
 
 # LOCO-Termux self-healing launcher
 # - bootstraps required tools
-# - repairs dependencies when lock/node_modules drift
+# - repairs dependencies when node_modules is missing or package.json changed
 # - rebuilds stale TypeScript output
 # - keeps Termux awake when supported
 # - restarts the control center after failures
 # - retries preparation failures indefinitely while Termux is alive
-# - uses warn-mode unhandled rejection handling; the supervisor is the final recovery layer
 
 cd "$(dirname "$0")" || exit 1
 
@@ -36,12 +35,10 @@ release_wake_lock() {
 
 bootstrap_tools() {
   command -v pkg >/dev/null 2>&1 || { log "Termux에서 실행하세요."; return 1; }
-
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     log "Node.js/npm 없음 → 설치/복구"
     pkg install -y nodejs || return 1
   fi
-
   if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
     log "Python 없음 → 설치"
     pkg install -y python || return 1
@@ -49,27 +46,32 @@ bootstrap_tools() {
   return 0
 }
 
+npm_bin() { command -v npm || printf '%s\n' npm; }
+
 prepare() {
   bootstrap_tools || return 1
 
-  if [ ! -f package-lock.json ] || [ ! -d node_modules ]; then
+  if [ ! -d node_modules ] || [ ! -f node_modules/.package-lock.json ]; then
     log "의존성 설치/복구 중..."
-    npm install || return 1
-  elif [ ! -f node_modules/.package-lock.json ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
-    log "의존성 잠금 상태 변경 감지 → npm install"
-    npm install || return 1
+    "$(npm_bin)" install --no-audit --no-fund || return 1
+  elif [ -f package.json ] && [ package.json -nt node_modules/.package-lock.json ]; then
+    log "package.json 변경 감지 → 의존성 갱신"
+    "$(npm_bin)" install --no-audit --no-fund || return 1
   fi
 
+  # The pinned KakaoForge revision is source-only in some git installs. The
+  # local loader repairs/builds its dist/ lazily, so npm install itself never
+  # becomes a single point of failure.
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
     rebuild=1
   elif [ ! -f dist/openchat-main.js ]; then
     rebuild=1
+  elif [ ! -f dist/qr-login.js ]; then
+    rebuild=1
   elif find src -type f -name '*.ts' -newer dist/termux-panel.js | grep -q .; then
     rebuild=1
   elif [ -f package.json ] && [ package.json -nt dist/termux-panel.js ]; then
-    rebuild=1
-  elif [ -f package-lock.json ] && [ package-lock.json -nt dist/termux-panel.js ]; then
     rebuild=1
   elif [ -f tsconfig.json ] && [ tsconfig.json -nt dist/termux-panel.js ]; then
     rebuild=1
@@ -77,11 +79,12 @@ prepare() {
 
   if [ "$rebuild" -eq 1 ]; then
     log "최신 소스/설정 감지 → TypeScript 전체 빌드"
-    npm run build || return 1
+    "$(npm_bin)" run build || return 1
   fi
 
   [ -f dist/termux-panel.js ] || { log "dist/termux-panel.js 생성 실패"; return 1; }
   [ -f dist/openchat-main.js ] || { log "dist/openchat-main.js 생성 실패"; return 1; }
+  [ -f dist/qr-login.js ] || { log "dist/qr-login.js 생성 실패"; return 1; }
   return 0
 }
 
