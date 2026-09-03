@@ -48,7 +48,7 @@ function commandHelp() {
     '!방등록해제 - 현재 방 등록 해제',
     '!도박가입 - 1000 포인트로 시작',
     '!도박 <포인트> - 50% 확률, 성공 시 3배',
-    '!kick <userId> - Open Chat 관리자/방장만 사용',
+    '!kick @유저멘션 - Open Chat 관리자/방장만 사용',
   ].join('\n');
 }
 
@@ -61,8 +61,45 @@ function recentEvents(limit = 10): any[] {
   try {
     const raw = JSON.parse(readFileSync(join(process.cwd(), 'loco_analyzer.json'), 'utf8'));
     const events = Array.isArray(raw?.events) ? raw.events : [];
-    return events.slice(-limit).reverse();
+    return events.filter((e: any) => ['JOIN', 'LEAVE'].includes(String(e?.event ?? e?.type ?? '').toUpperCase())).slice(-limit).reverse();
   } catch { return []; }
+}
+
+function extractMentionTarget(msg: any, rawArg: string): { id: string; name?: string } | null {
+  // KakaoForge/message wrappers can expose mentions in different fields.
+  // Prefer structured mention IDs; only fall back to a previously observed user
+  // with the exact nickname. Never guess an arbitrary numeric ID.
+  const mentions = [
+    msg?.message?.mentions,
+    msg?.message?.mention,
+    msg?.mentions,
+    msg?.mention,
+    msg?.message?.meta?.mentions,
+    msg?.message?.metadata?.mentions,
+  ].flatMap((value: any) => Array.isArray(value) ? value : value ? [value] : []);
+
+  const normalizedName = rawArg.replace(/^@/, '').trim();
+  for (const mention of mentions) {
+    const id = mention?.userId ?? mention?.id ?? mention?.memberId ?? mention?.user?.id;
+    const name = mention?.name ?? mention?.nickname ?? mention?.user?.name ?? mention?.user?.nickname;
+    if (id != null && (!normalizedName || !name || String(name).replace(/^@/, '') === normalizedName)) {
+      return { id: String(id), name: name != null ? String(name) : undefined };
+    }
+  }
+
+  const text = String(msg?.message?.text ?? '');
+  const atIndex = text.indexOf('@');
+  if (atIndex >= 0) {
+    const candidate = text.slice(atIndex + 1).trim().split(/\s+/)[0];
+    if (candidate && candidate === normalizedName) {
+      for (const mention of mentions) {
+        const id = mention?.userId ?? mention?.id ?? mention?.memberId ?? mention?.user?.id;
+        if (id != null) return { id: String(id), name: candidate };
+      }
+    }
+  }
+
+  return null;
 }
 
 async function handleCommand(client: any, chat: any, msg: any) {
@@ -119,7 +156,7 @@ async function handleCommand(client: any, chat: any, msg: any) {
       case '!입퇴장로그': {
         const events = recentEvents(10);
         await send(events.length
-          ? ['📜 최근 입퇴장 로그', ...events.map((e: any) => `${String(e.event ?? '').toUpperCase()} | ${e.nickname ?? ''} | ${e.at ?? ''}`)].join('\n')
+          ? ['📜 최근 입퇴장 로그', ...events.map((e: any) => `${String(e.event ?? e.type ?? '').toUpperCase()} | ${e.nickname ?? ''} | ${e.at ?? ''}`)].join('\n')
           : '수집된 입퇴장 로그가 없습니다.');
         break;
       }
@@ -168,7 +205,7 @@ async function handleCommand(client: any, chat: any, msg: any) {
         if (amount > balance) { await send(`잔액 부족: ${balance.toLocaleString()}P`); break; }
         if (Math.random() < 0.5) {
           room.users[userId].points = balance + amount * 2;
-          await send(`🎉 당첨! +${(amount * 2).toLocaleString()}P\n잔액: ${Number(room.users[userId].points).toLocaleString()}P`);
+          await send(`🎉 당첨! 총 지급 3배 (+${(amount * 2).toLocaleString()}P)\n잔액: ${Number(room.users[userId].points).toLocaleString()}P`);
         } else {
           room.users[userId].points = balance - amount;
           await send(`💥 낙첨! -${amount.toLocaleString()}P\n잔액: ${Number(room.users[userId].points).toLocaleString()}P`);
@@ -180,11 +217,22 @@ async function handleCommand(client: any, chat: any, msg: any) {
       case '!kick': {
         if (!msg.room?.isOpenChat) { await send('❌ !kick은 Open Chat에서만 사용할 수 있습니다.'); break; }
         if (!isManager(client)) { await send('❌ 봇이 Open Chat 방장/관리자가 아닙니다.'); break; }
-        const target = args[0];
-        if (!target || !/^\d+$/.test(target)) { await send('사용법: !kick <userId>'); break; }
-        if (String(target) === String(client.userId)) { await send('❌ 봇 자신은 내보낼 수 없습니다.'); break; }
-        await chat.openChatKick(roomId, Number(target));
-        await send(`✅ 사용자 ${target} 내보내기 요청을 전송했습니다.`);
+        const rawTarget = args.join(' ').trim();
+        if (!rawTarget || !rawTarget.startsWith('@')) {
+          await send('사용법: !kick @유저멘션');
+          break;
+        }
+        const target = extractMentionTarget(msg, rawTarget);
+        if (!target) {
+          await send('❌ 유저 멘션을 인식하지 못했습니다. 카카오톡에서 실제 사용자를 @멘션한 뒤 다시 입력하세요.');
+          break;
+        }
+        if (String(target.id) === String(client.userId)) {
+          await send('❌ 봇 자신은 내보낼 수 없습니다.');
+          break;
+        }
+        await chat.openChatKick(roomId, Number(target.id));
+        await send(`✅ ${target.name ? `@${target.name}` : `사용자 ${target.id}`} 내보내기 요청을 전송했습니다.`);
         break;
       }
 
