@@ -1,8 +1,8 @@
 import { mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { createAuthByQR, createClient } from 'kakaoforge';
-import type { AuthPayload } from 'kakaoforge';
+import { createAuthByQR, createClient } from './kakaoforge-loader';
+import type { AuthPayload } from './kakaoforge-loader';
 import qrcode from 'qrcode-terminal';
 import { loadConfig } from './config';
 
