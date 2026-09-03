@@ -28,12 +28,10 @@ function saveCommandState(state: Record<string, any>) {
   writeFileSync(COMMAND_STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
 }
 
-function roomKey(roomId: string) { return String(roomId); }
-
 function ensureRoomState(state: Record<string, any>, roomId: string) {
-  const key = roomKey(roomId);
+  const key = String(roomId);
   state.rooms ??= {};
-  state.rooms[key] ??= { registered: false, code: null, codeExpiresAt: 0, messages: 0, commands: 0, users: {} };
+  state.rooms[key] ??= { registered: false, code: null, codeExpiresAt: 0, commands: 0, users: {} };
   return state.rooms[key];
 }
 
@@ -48,13 +46,14 @@ function commandHelp() {
     '!봇정보 - 연결/방 정보',
     '!봇등록 - 현재 방 8자리 등록코드 발급',
     '!방등록해제 - 현재 방 등록 해제',
+    '!도박가입 - 1000 포인트로 시작',
+    '!도박 <포인트> - 50% 확률, 성공 시 3배',
     '!kick <userId> - Open Chat 관리자/방장만 사용',
   ].join('\n');
 }
 
 function isManager(client: any): boolean {
   const type = Number(client?.type);
-  // KakaoForge MemberType.OpenChat.Owner = 1, Manager = 4.
   return type === 1 || type === 4;
 }
 
@@ -79,7 +78,9 @@ async function handleCommand(client: any, chat: any, msg: any) {
   const state = loadCommandState();
   const room = ensureRoomState(state, roomId);
   room.commands = Number(room.commands ?? 0) + 1;
-  room.users[String(msg.sender?.id ?? '')] ??= { nickname: String(msg.sender?.name ?? ''), messages: 0 };
+  const userId = String(msg?.sender?.id ?? '');
+  room.users[userId] ??= { nickname: String(msg?.sender?.name ?? ''), messages: 0, joined: false, points: 0 };
+  room.users[userId].nickname = String(msg?.sender?.name ?? '');
   saveCommandState(state);
 
   const send = async (body: string) => chat.sendText(roomId, body);
@@ -97,35 +98,34 @@ async function handleCommand(client: any, chat: any, msg: any) {
         break;
 
       case '!echo':
-        if (args.length) await send(args.join(' '));
-        else await send('사용법: !echo <내용>');
+        await send(args.length ? args.join(' ') : '사용법: !echo <내용>');
         break;
 
       case '!봇정보':
-      case '!info': {
-        const transport = 'KakaoForge/LOCO';
-        await send(`🤖 LOCO-Termux\n전송: ${transport}\n방: ${String(msg.room?.name ?? roomId)}\nOpen Chat: ${msg.room?.isOpenChat === true ? 'YES' : 'NO'}\n등록: ${room.registered ? 'YES' : 'NO'}`);
+      case '!info':
+        await send(`🤖 LOCO-Termux\n전송: KakaoForge/LOCO\n방: ${String(msg.room?.name ?? roomId)}\nOpen Chat: ${msg.room?.isOpenChat === true ? 'YES' : 'NO'}\n등록: ${room.registered ? 'YES' : 'NO'}`);
         break;
-      }
 
       case '!채팅순위': {
         const rows = Object.values(room.users as Record<string, any>)
           .sort((a: any, b: any) => Number(b.messages ?? 0) - Number(a.messages ?? 0))
           .slice(0, 10);
-        if (!rows.length) { await send('아직 수집된 채팅 데이터가 없습니다.'); break; }
-        await send(['🏆 채팅순위', ...rows.map((x: any, i) => `${i + 1}. ${x.nickname || '알 수 없음'} — ${x.messages}회`)].join('\n'));
+        await send(rows.length
+          ? ['🏆 채팅순위', ...rows.map((x: any, i) => `${i + 1}. ${x.nickname || '알 수 없음'} — ${x.messages}회`)].join('\n')
+          : '아직 수집된 채팅 데이터가 없습니다.');
         break;
       }
 
       case '!입퇴장로그': {
         const events = recentEvents(10);
-        if (!events.length) { await send('수집된 입퇴장 로그가 없습니다.'); break; }
-        const lines = events.map((e: any) => `${String(e.event ?? '').toUpperCase()} | ${e.nickname ?? ''} | ${e.at ?? ''}`);
-        await send(['📜 최근 입퇴장 로그', ...lines].join('\n'));
+        await send(events.length
+          ? ['📜 최근 입퇴장 로그', ...events.map((e: any) => `${String(e.event ?? '').toUpperCase()} | ${e.nickname ?? ''} | ${e.at ?? ''}`)].join('\n')
+          : '수집된 입퇴장 로그가 없습니다.');
         break;
       }
 
       case '!봇등록': {
+        if (!isManager(client)) { await send('❌ 봇 등록은 Open Chat 방장/관리자만 사용할 수 있습니다.'); break; }
         const now = Date.now();
         if (room.code && Number(room.codeExpiresAt) > now) {
           await send(`🔐 현재 등록코드: ${room.code}\n남은 시간: ${Math.ceil((Number(room.codeExpiresAt) - now) / 1000)}초`);
@@ -141,12 +141,41 @@ async function handleCommand(client: any, chat: any, msg: any) {
       }
 
       case '!방등록해제':
+        if (!isManager(client)) { await send('❌ 방 등록 해제는 Open Chat 방장/관리자만 사용할 수 있습니다.'); break; }
         room.registered = false;
         room.code = null;
         room.codeExpiresAt = 0;
         saveCommandState(state);
         await send('✅ 현재 방의 봇 등록을 해제했습니다.');
         break;
+
+      case '!도박가입':
+        if (room.users[userId].joined) {
+          await send(`이미 가입되어 있습니다. 잔액: ${Number(room.users[userId].points ?? 0).toLocaleString()}P`);
+          break;
+        }
+        room.users[userId].joined = true;
+        room.users[userId].points = 1000;
+        saveCommandState(state);
+        await send(`🎰 ${room.users[userId].nickname}님 가입 완료! 시작 잔액: 1,000P`);
+        break;
+
+      case '!도박': {
+        if (!room.users[userId].joined) { await send('먼저 !도박가입 을 입력하세요.'); break; }
+        const amount = Number(args[0]);
+        const balance = Number(room.users[userId].points ?? 0);
+        if (!Number.isInteger(amount) || amount <= 0) { await send('사용법: !도박 <포인트>'); break; }
+        if (amount > balance) { await send(`잔액 부족: ${balance.toLocaleString()}P`); break; }
+        if (Math.random() < 0.5) {
+          room.users[userId].points = balance + amount * 2;
+          await send(`🎉 당첨! +${(amount * 2).toLocaleString()}P\n잔액: ${Number(room.users[userId].points).toLocaleString()}P`);
+        } else {
+          room.users[userId].points = balance - amount;
+          await send(`💥 낙첨! -${amount.toLocaleString()}P\n잔액: ${Number(room.users[userId].points).toLocaleString()}P`);
+        }
+        saveCommandState(state);
+        break;
+      }
 
       case '!kick': {
         if (!msg.room?.isOpenChat) { await send('❌ !kick은 Open Chat에서만 사용할 수 있습니다.'); break; }
@@ -162,9 +191,8 @@ async function handleCommand(client: any, chat: any, msg: any) {
       default:
         return;
     }
-    room.commands = Number(room.commands ?? 0);
     saveCommandState(state);
-    saveState({ lastCommand: { command, roomId, roomName: String(msg.room?.name ?? ''), userId: String(msg.sender?.id ?? ''), nickname: String(msg.sender?.name ?? ''), at: new Date().toISOString() } });
+    saveState({ lastCommand: { command, roomId, roomName: String(msg.room?.name ?? ''), userId, nickname: String(msg.sender?.name ?? ''), at: new Date().toISOString() } });
   } catch (error) {
     console.error('[COMMAND] failed:', error instanceof Error ? error.stack || error.message : String(error));
     try { await send(`❌ 명령 실행 실패: ${error instanceof Error ? error.message : String(error)}`); } catch {}
@@ -202,9 +230,7 @@ async function main() {
       })).filter((room: any) => room.id);
       saveState({ rooms: normalized, roomCount: normalized.length });
       console.log(`[LOCO] 방 ${normalized.length}개 동기화 완료.`);
-      for (const room of normalized) {
-        console.log(`  - ${room.name || '(이름 없음)'} [${room.id}]${room.isOpenChat ? ' [OPENCHAT]' : ''}`);
-      }
+      for (const room of normalized) console.log(`  - ${room.name || '(이름 없음)'} [${room.id}]${room.isOpenChat ? ' [OPENCHAT]' : ''}`);
     } catch (error) {
       console.error('[LOCO] 방 목록 동기화 실패:', error instanceof Error ? error.message : String(error));
       saveState({ connected: true, roomSyncError: String(error) });
@@ -220,30 +246,22 @@ async function main() {
       isOpenChat: room?.isOpenChat === true,
     };
     saveState({ lastMessage: event });
-
     if (event.userId !== String(client.userId)) {
       const state = loadCommandState();
       const roomState = ensureRoomState(state, event.roomId);
       const uid = event.userId;
-      roomState.users[uid] ??= { nickname: event.nickname, messages: 0 };
+      roomState.users[uid] ??= { nickname: event.nickname, messages: 0, joined: false, points: 0 };
       roomState.users[uid].nickname = event.nickname;
       roomState.users[uid].messages = Number(roomState.users[uid].messages ?? 0) + 1;
       saveCommandState(state);
       await handleCommand(client, chat, msg);
     }
-
     if (process.env.LOCO_DEBUG === '1') console.log(`[MSG] [${event.roomName}] ${event.nickname}: ${event.text}`);
   });
 
-  client.onJoin?.((chat: any, event: any) => {
-    saveState({ lastMemberEvent: { type: 'JOIN', at: new Date().toISOString(), raw: event } });
-  });
-  client.onLeave?.((chat: any, event: any) => {
-    saveState({ lastMemberEvent: { type: 'LEAVE', at: new Date().toISOString(), raw: event } });
-  });
-  client.onKick?.((chat: any, event: any) => {
-    saveState({ lastMemberEvent: { type: 'KICK', at: new Date().toISOString(), raw: event } });
-  });
+  client.onJoin?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'JOIN', at: new Date().toISOString(), raw: event } }));
+  client.onLeave?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'LEAVE', at: new Date().toISOString(), raw: event } }));
+  client.onKick?.((chat: any, event: any) => saveState({ lastMemberEvent: { type: 'KICK', at: new Date().toISOString(), raw: event } }));
   client.on('error', (error: unknown) => {
     console.error('[LOCO] client error:', error instanceof Error ? error.message : String(error));
     saveState({ connected: false, error: String(error) });
