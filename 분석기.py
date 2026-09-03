@@ -1,22 +1,13 @@
 from __future__ import annotations
-
-"""High-throughput LOCO TERMUX room/event analyzer.
-
-Authentication is performed by 분석기_auth.py through Kakao's documented OAuth
-flow. This module only records verified identity and observable room state.
-"""
-
-from dataclasses import dataclass, asdict
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from collections import Counter, deque
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from collections import deque
-import json
-import threading
-import time
+from threading import Condition, RLock, Thread
+from typing import Any, Iterable
+import json, os, tempfile, time
 
-
-@dataclass
+@dataclass(slots=True)
 class MemberEvent:
     room_id: str
     user_id: str
@@ -24,295 +15,199 @@ class MemberEvent:
     event: str
     at: str
     count: int = 0
-    message_id: Optional[str] = None
+    message_id: str | None = None
 
-
-@dataclass
+@dataclass(slots=True)
 class PendingLeave:
     room_id: str
     user_id: str
     nickname: str
     left_at: str
-    message_id: Optional[str] = None
+    message_id: str | None = None
 
-
-@dataclass
+@dataclass(slots=True)
 class SessionDiagnostic:
     user_id: str
-    session_id: Optional[str]
+    session_id: str | None
     observed_at: str
     status: str
-    error_code: Optional[str] = None
-    detail: Optional[str] = None
-
+    error_code: str | None = None
+    detail: str | None = None
 
 class LocoAnalyzer:
-    """Thread-safe, memory-first analyzer with indexed O(1) hot paths."""
-
-    VALID_EVENTS = {"JOIN", "LEAVE", "READ", "KICK"}
-
-    def __init__(self, data_file: str = "loco_analyzer.json", max_events: int = 5000,
-                 max_reads: int = 5000, max_diagnostics: int = 1000,
-                 save_delay: float = 0.25, save_every: int = 0):
-        self.data_file = Path(data_file)
-        self.max_events = max(1, int(max_events))
-        self.max_reads = max(1, int(max_reads))
-        self.max_diagnostics = max(1, int(max_diagnostics))
-        self.save_delay = max(0.0, float(save_delay))
-        self.save_every = max(0, int(save_every))
-        self._lock = threading.RLock()
-        self._save_condition = threading.Condition(self._lock)
-        self._save_pending = False
-        self._save_generation = 0
-        self._saved_generation = 0
-        self._event_since_save = 0
-        self._stop_worker = False
-        self._save_worker_thread = threading.Thread(target=self._persistence_worker, name="loco-persist", daemon=True)
-
-        self.events: deque[MemberEvent] = deque(maxlen=self.max_events)
-        self.pending_leaves: Dict[str, PendingLeave] = {}
-        self.reads: Dict[str, Dict[str, str]] = {}
-        self._read_order: deque[str] = deque(maxlen=self.max_reads)
-        self.join_counts: Dict[str, int] = {}
-        self.online: Dict[str, Dict[str, str]] = {}
-        self._room_members: Dict[str, Dict[str, Dict[str, str]]] = {}
-        self._room_events: Dict[str, deque[MemberEvent]] = {}
-        self._room_stats: Dict[str, Dict[str, int]] = {}
-        self._global_stats = {"events": 0, "joins": 0, "leaves": 0, "reads": 0, "diagnostics": 0}
-        self.session_diagnostics: deque[SessionDiagnostic] = deque(maxlen=self.max_diagnostics)
-        self._load()
-        self._save_worker_thread.start()
-
+    """Fast durable analyzer for authenticated, observable LOCO events."""
+    VALID_EVENTS=frozenset(("JOIN","LEAVE","READ","KICK")); VERSION=7
+    def __init__(self,data_file="loco_analyzer.json",max_events=5000,max_reads=5000,max_diagnostics=1000,max_messages=5000,save_delay=.2,save_every=0):
+        self.data_file=Path(data_file).expanduser(); self.max_events=max(1,int(max_events)); self.max_reads=max(1,int(max_reads)); self.max_diagnostics=max(1,int(max_diagnostics)); self.max_messages=max(1,int(max_messages)); self.save_delay=max(0.,float(save_delay)); self.save_every=max(0,int(save_every))
+        self._lock=RLock(); self._condition=Condition(self._lock); self._dirty=False; self._stopping=False; self._changes=0
+        self.events=deque(maxlen=self.max_events); self.pending_leaves={}; self.reads={}; self._read_order=deque(maxlen=self.max_reads); self.join_counts={}; self.online={}; self.messages={}; self._message_order=deque(maxlen=self.max_messages); self._room_stats={}; self.session_diagnostics=deque(maxlen=self.max_diagnostics)
+        self._load(); self._worker=Thread(target=self._persistence_worker,name="loco-persist",daemon=True); self._worker.start()
     @staticmethod
-    def _safe_user(user: object) -> tuple[str, str]:
-        if isinstance(user, dict):
-            uid = user.get("user_id", user.get("userId", user.get("id")))
-            nickname = user.get("nickname", "알 수 없음")
-        else:
-            uid = (getattr(user, "user_id", None) or getattr(user, "userId", None) or getattr(user, "id", None))
-            nickname = getattr(user, "nickname", "알 수 없음")
-        return str(uid or nickname), str(nickname or "알 수 없음")
-
+    def _now(): return datetime.now(timezone.utc).isoformat(timespec="seconds")
     @staticmethod
-    def _now() -> str:
-        return datetime.now().isoformat(timespec="seconds")
-
+    def _safe_user(user):
+        if isinstance(user,dict): uid=user.get("user_id",user.get("userId",user.get("id",user.get("uid")))); name=user.get("nickname",user.get("nickName",user.get("name","알 수 없음")))
+        else: uid=next((getattr(user,k,None) for k in ("user_id","userId","id","uid") if getattr(user,k,None) is not None),None); name=next((getattr(user,k,None) for k in ("nickname","nickName","name") if getattr(user,k,None)),"알 수 없음")
+        return str(uid or name).strip(),str(name or "알 수 없음").strip()
     @staticmethod
-    def _time_text(iso_time: str) -> str:
+    def _key(room_id,user_id): return f"{room_id}\x1f{user_id}"
+    @staticmethod
+    def _iso(v):
+        if v is None:return LocoAnalyzer._now()
+        if isinstance(v,(int,float)):return datetime.fromtimestamp(float(v),timezone.utc).isoformat(timespec="seconds")
+        return str(v).strip() or LocoAnalyzer._now()
+    @classmethod
+    def _event(cls,raw):
         try:
-            return datetime.fromisoformat(iso_time).strftime("%H시 %M분")
-        except ValueError:
-            return iso_time
-
-    @staticmethod
-    def _member_key(room_id: str, user_id: str) -> str:
-        return f"{room_id}\x1f{user_id}"
-
-    def _mark_dirty(self) -> None:
-        self._save_generation += 1
-        self._event_since_save += 1
-        self._save_pending = True
-        self._save_condition.notify()
-
-    def _snapshot(self) -> dict:
+            e=str(raw.get("event","")).upper()
+            if e not in cls.VALID_EVENTS:return None
+            return MemberEvent(str(raw.get("room_id","")),str(raw.get("user_id","")),str(raw.get("nickname","알 수 없음")),e,cls._iso(raw.get("at")),int(raw.get("count",0) or 0),raw.get("message_id"))
+        except (TypeError,ValueError,AttributeError):return None
+    def _load(self):
+        try:p=json.loads(self.data_file.read_text(encoding="utf-8"))
+        except (OSError,ValueError,TypeError):return
+        if not isinstance(p,dict):return
         with self._lock:
-            return {
-                "version": 5,
-                "events": [asdict(e) for e in self.events],
-                "pending_leaves": {k: asdict(v) for k, v in self.pending_leaves.items()},
-                "reads": dict(self.reads),
-                "join_counts": dict(self.join_counts),
-                "online": dict(self.online),
-                "session_diagnostics": [asdict(x) for x in self.session_diagnostics],
-            }
-
-    def _save_now(self) -> None:
-        payload = self._snapshot()
-        tmp = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
+            for x in p.get("events",[]):
+                if isinstance(x,dict):
+                    e=self._event(x)
+                    if e:self._append_event(e,False)
+            for k,v in (p.get("pending_leaves",{}) or {}).items():
+                if isinstance(v,dict):
+                    try:self.pending_leaves[str(k)]=PendingLeave(str(v.get("room_id","")),str(v.get("user_id","")),str(v.get("nickname","알 수 없음")),self._iso(v.get("left_at")),v.get("message_id"))
+                    except (TypeError,ValueError):pass
+            rr=p.get("reads",{})
+            if isinstance(rr,dict):
+                for mid,users in list(rr.items())[-self.max_reads:]:
+                    if isinstance(users,dict):self.reads[str(mid)]={str(k):str(v) for k,v in users.items()}
+            self._read_order.extend(self.reads)
+            jc=p.get("join_counts",{}); self.join_counts={str(k):max(0,int(v)) for k,v in jc.items()} if isinstance(jc,dict) else {}
+            online=p.get("online",{}); self.online={str(k):{"user_id":str(v.get("user_id","")),"nickname":str(v.get("nickname",""))} for k,v in online.items() if isinstance(v,dict)} if isinstance(online,dict) else {}
+            mm=p.get("messages",{}); self.messages={str(k):v for k,v in list(mm.items())[-self.max_messages:] if isinstance(v,dict)} if isinstance(mm,dict) else {}; self._message_order.extend(self.messages)
+            for x in p.get("session_diagnostics",[]) [-self.max_diagnostics:]:
+                if isinstance(x,dict):
+                    try:self.session_diagnostics.append(SessionDiagnostic(str(x.get("user_id","")),x.get("session_id"),self._iso(x.get("observed_at")),str(x.get("status","")),x.get("error_code"),x.get("detail")))
+                    except (TypeError,ValueError):pass
+    def _append_event(self,e,persist=True):
+        self.events.append(e); s=self._room_stats.setdefault(e.room_id,Counter()); s["events"]+=1; s[e.event.lower()]+=1
+        if persist:self._save()
+    def _save_now(self):
+        p={"version":self.VERSION,"updated_at":self._now(),"events":[asdict(x) for x in self.events],"pending_leaves":{k:asdict(v) for k,v in self.pending_leaves.items()},"reads":self.reads,"join_counts":self.join_counts,"online":self.online,"messages":self.messages,"session_diagnostics":[asdict(x) for x in self.session_diagnostics]}
+        tmp=None
         try:
-            self.data_file.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-            tmp.replace(self.data_file)
-            with self._lock:
-                self._saved_generation = self._save_generation
-                self._save_pending = self._saved_generation != self._save_generation
-                self._event_since_save = 0
-        except OSError as exc:
-            print(f"[Analyzer] save failed: {exc}")
-
-    def _persistence_worker(self) -> None:
+            self.data_file.parent.mkdir(parents=True,exist_ok=True); fd,tmp=tempfile.mkstemp(prefix=f".{self.data_file.name}.",dir=str(self.data_file.parent))
+            with os.fdopen(fd,"w",encoding="utf-8") as f:json.dump(p,f,ensure_ascii=False,separators=(",",":"));f.flush();os.fsync(f.fileno())
+            os.replace(tmp,self.data_file)
+            with self._lock:self._dirty=False
+        except OSError as e:print(f"[Analyzer] save failed: {e}")
+        finally:
+            if tmp:
+                try:os.unlink(tmp)
+                except OSError:pass
+    def _persistence_worker(self):
         while True:
-            with self._save_condition:
-                while not self._save_pending and not self._stop_worker:
-                    self._save_condition.wait()
-                if self._stop_worker and not self._save_pending:
-                    return
-                target = self._save_generation
-                delay = self.save_delay
-            if delay > 0:
-                time.sleep(delay)
-                with self._lock:
-                    if self._save_generation != target and not self._stop_worker:
-                        continue
-                    if not self._save_pending and not self._stop_worker:
-                        continue
+            with self._condition:
+                while not self._dirty and not self._stopping:self._condition.wait()
+                if self._stopping and not self._dirty:return
+            if self.save_delay:time.sleep(self.save_delay)
             self._save_now()
-
-    def _save(self) -> None:
-        with self._save_condition:
-            self._mark_dirty()
-            self._save_condition.notify()
-
-    def flush(self) -> None:
-        """Synchronously persist the newest in-memory state."""
-        while True:
-            with self._lock:
-                if not self._save_pending:
-                    return
-                target = self._save_generation
-            self._save_now()
-            with self._lock:
-                if self._save_generation == target and not self._save_pending:
-                    return
-
-    def close(self) -> None:
+    def _save(self,force=True):
+        with self._condition:self._dirty=True;self._changes+=1;self._condition.notify()
+    def flush(self):
+        with self._lock:
+            if self._dirty:self._save_now()
+    def close(self):
         self.flush()
-        with self._save_condition:
-            self._stop_worker = True
-            self._save_condition.notify_all()
-        if self._save_worker_thread.is_alive():
-            self._save_worker_thread.join(timeout=max(1.0, self.save_delay + 1.0))
-
-    def _load(self) -> None:
-        if not self.data_file.exists():
-            return
-        try:
-            payload = json.loads(self.data_file.read_text(encoding="utf-8"))
-            for raw in payload.get("events", [])[-self.max_events:]:
-                self._append_event(MemberEvent(**raw), index_only=True)
-            self.pending_leaves = {k: PendingLeave(**v) for k, v in payload.get("pending_leaves", {}).items()}
-            self.reads = {str(k): {str(uid): str(nick) for uid, nick in v.items()}
-                          for k, v in list(payload.get("reads", {}).items())[-self.max_reads:] if isinstance(v, dict)}
-            self._read_order.extend(self.reads.keys())
-            self.join_counts = {str(k): int(v) for k, v in payload.get("join_counts", {}).items()}
-            self.online = {str(k): {"user_id": str(v.get("user_id", "")), "nickname": str(v.get("nickname", ""))}
-                           for k, v in payload.get("online", {}).items() if isinstance(v, dict)}
-            for key, member in self.online.items():
-                room, _, _ = key.partition("\x1f")
-                self._room_members.setdefault(room, {})[key] = member
-            self.session_diagnostics.extend(SessionDiagnostic(**x) for x in payload.get("session_diagnostics", [])[-self.max_diagnostics:])
-            self._global_stats["reads"] = len(self.reads)
-            self._global_stats["diagnostics"] = len(self.session_diagnostics)
-        except (OSError, ValueError, TypeError, KeyError):
-            self.events.clear(); self.pending_leaves.clear(); self.reads.clear(); self._read_order.clear()
-            self.join_counts.clear(); self.online.clear(); self._room_members.clear(); self._room_events.clear(); self._room_stats.clear()
-            self.session_diagnostics.clear(); self._global_stats = {"events": 0, "joins": 0, "leaves": 0, "reads": 0, "diagnostics": 0}
-
-    def _append_event(self, event: MemberEvent, index_only: bool = False) -> None:
-        if len(self.events) == self.max_events:
-            old = self.events.popleft()
-            old_room = self._room_events.get(old.room_id)
-            if old_room:
-                try: old_room.remove(old)
-                except ValueError: pass
-                if not old_room: self._room_events.pop(old.room_id, None)
-            old_stats = self._room_stats.get(old.room_id)
-            if old_stats:
-                old_stats["events"] = max(0, old_stats["events"] - 1)
-                if old.event == "JOIN": old_stats["joins"] = max(0, old_stats["joins"] - 1)
-                elif old.event == "LEAVE": old_stats["leaves"] = max(0, old_stats["leaves"] - 1)
-                if old_stats["events"] == 0: self._room_stats.pop(old.room_id, None)
-            self._global_stats["events"] = max(0, self._global_stats["events"] - 1)
-            if old.event == "JOIN": self._global_stats["joins"] = max(0, self._global_stats["joins"] - 1)
-            elif old.event == "LEAVE": self._global_stats["leaves"] = max(0, self._global_stats["leaves"] - 1)
-        self.events.append(event)
-        room = str(event.room_id)
-        self._room_events.setdefault(room, deque(maxlen=self.max_events)).append(event)
-        stats = self._room_stats.setdefault(room, {"events": 0, "joins": 0, "leaves": 0})
-        stats["events"] += 1; self._global_stats["events"] += 1
-        if event.event == "JOIN": stats["joins"] += 1; self._global_stats["joins"] += 1
-        elif event.event == "LEAVE": stats["leaves"] += 1; self._global_stats["leaves"] += 1
-
-    def authenticated_user(self, room_id: str, user_id: str, nickname: str, session_id: str) -> Dict[str, Any]:
-        room_id, user_id, nickname, session_id = map(str, (room_id, user_id, nickname, session_id))
-        if not user_id or not session_id: raise ValueError("authenticated_user requires user_id and session_id")
-        count = self.user_joined(room_id, {"user_id": user_id, "nickname": nickname})
-        self.record_session_diagnostic(user_id, session_id, "AUTHENTICATED", detail="Verified by analyzer auth adapter")
-        return {"ok": True, "authenticated": True, "user_id": user_id, "nickname": nickname, "session_id": session_id, "join_count": count}
-
-    def user_joined(self, room_id: str, user: object, message_id: Optional[str] = None) -> int:
-        room_id = str(room_id); user_id, nickname = self._safe_user(user); key = self._member_key(room_id, user_id); now = self._now()
+        with self._condition:self._stopping=True;self._condition.notify_all()
+        if self._worker.is_alive():self._worker.join(timeout=max(1.,self.save_delay+1.))
+    def authenticated_user(self,room_id,user_id,nickname,session_id):
+        if not str(user_id) or not str(session_id):raise ValueError("authenticated_user requires user_id and session_id")
+        count=self.user_joined(room_id,{"user_id":user_id,"nickname":nickname});self.record_session_diagnostic(user_id,session_id,"AUTHENTICATED",detail="Verified by analyzer auth adapter")
+        return {"ok":True,"authenticated":True,"user_id":str(user_id),"nickname":str(nickname),"session_id":str(session_id),"join_count":count}
+    def user_joined(self,room_id,user,message_id=None):
+        rid=str(room_id);uid,name=self._safe_user(user);key=self._key(rid,uid)
         with self._lock:
-            count = self.join_counts.get(key, 0) + 1; self.join_counts[key] = count
-            member = {"user_id": user_id, "nickname": nickname}; self.online[key] = member
-            self._room_members.setdefault(room_id, {})[key] = member; self.pending_leaves.pop(key, None)
-            self._append_event(MemberEvent(room_id, user_id, nickname, "JOIN", now, count, message_id))
-        self._save(); return count
-
-    def user_left(self, room_id: str, user: object, message_id: Optional[str] = None) -> str:
-        room_id = str(room_id); user_id, nickname = self._safe_user(user); left_at = self._now(); key = self._member_key(room_id, user_id)
-        with self._lock:
-            self._append_event(MemberEvent(room_id, user_id, nickname, "LEAVE", left_at, 0, message_id))
-            self.pending_leaves[key] = PendingLeave(room_id, user_id, nickname, left_at, message_id)
-            self.online.pop(key, None); self._room_members.get(room_id, {}).pop(key, None)
-        self._save(); return self.leave_message(nickname, left_at)
-
-    def record_read(self, message_id: str, user: object) -> None:
-        user_id, nickname = self._safe_user(user); message_id = str(message_id)
-        with self._lock:
-            if message_id not in self.reads:
-                if len(self._read_order) >= self.max_reads:
-                    old = self._read_order.popleft(); self.reads.pop(old, None)
-                self._read_order.append(message_id); self.reads[message_id] = {}
-            self.reads[message_id][user_id] = nickname; self._global_stats["reads"] = len(self.reads)
+            count=self.join_counts.get(key,0)+1;self.join_counts[key]=count;self.online[key]={"user_id":uid,"nickname":name};self.pending_leaves.pop(key,None);self._append_event(MemberEvent(rid,uid,name,"JOIN",self._now(),count,message_id),False)
+        self._save();return count
+    def user_left(self,room_id,user,message_id=None):
+        rid=str(room_id);uid,name=self._safe_user(user);key=self._key(rid,uid);now=self._now()
+        with self._lock:self._append_event(MemberEvent(rid,uid,name,"LEAVE",now,self.join_counts.get(key,0),message_id),False);self.pending_leaves[key]=PendingLeave(rid,uid,name,now,message_id);self.online.pop(key,None)
+        self._save();return self.leave_message(name,now)
+    def user_kicked(self,room_id,user,message_id=None):
+        rid=str(room_id);uid,name=self._safe_user(user);key=self._key(rid,uid)
+        with self._lock:self._append_event(MemberEvent(rid,uid,name,"KICK",self._now(),self.join_counts.get(key,0),message_id),False);self.pending_leaves.pop(key,None);self.online.pop(key,None)
         self._save()
-
-    def record_session_diagnostic(self, user_id: str, session_id: Optional[str], status: str,
-                                  error_code: Optional[str] = None, detail: Optional[str] = None) -> None:
-        diagnostic = SessionDiagnostic(str(user_id), str(session_id) if session_id else None, self._now(), str(status), str(error_code) if error_code else None, str(detail) if detail else None)
+    def record_read(self,message_id,user):
+        mid=str(message_id).strip();uid,name=self._safe_user(user)
+        if not mid or not uid:return
         with self._lock:
-            if len(self.session_diagnostics) == self.max_diagnostics: self.session_diagnostics.popleft()
-            self.session_diagnostics.append(diagnostic); self._global_stats["diagnostics"] = len(self.session_diagnostics)
+            if mid not in self.reads:self._read_order.append(mid);self.reads[mid]={}
+            self.reads[mid][uid]=name
+            while len(self._read_order)>self.max_reads:self.reads.pop(self._read_order.popleft(),None)
         self._save()
-
-    def diagnose_999(self, user_id: str) -> Dict[str, Any]:
+    def record_message(self,room_id,message_id,user,text="",*,at=None,readers:Iterable[object]|None=None,reader_count=None,raw=None):
+        rid,mid=str(room_id).strip(),str(message_id).strip();uid,name=self._safe_user(user)
+        if not rid or not mid:raise ValueError("room_id and message_id are required")
+        item={"message_id":mid,"room_id":rid,"user_id":uid,"nickname":name,"text":str(text),"at":self._iso(at),"reader_count":None if reader_count is None else max(0,int(reader_count))}
         with self._lock:
-            last = next((x for x in reversed(self.session_diagnostics) if x.user_id == str(user_id)), None)
-            observations = sum(x.user_id == str(user_id) for x in self.session_diagnostics)
-            return {"user_id": str(user_id), "observations": observations, "last_status": last.status if last else None,
-                    "last_error_code": last.error_code if last else None, "last_session_id": last.session_id if last else None,
-                    "recommendation": "Use the real OAuth response and server error for diagnosis; no error is silently ignored."}
-
-    def leave_message(self, nickname: str, left_at: str) -> str:
-        return (f"{nickname}님이 나가셨습니다.\n\n[전체보기]\n\n{nickname} 님이 {self._time_text(left_at)}에 나가셨습니다.\n"
-                "나간사람을 내보내실려면 이 메시지에 답장으로 kick이라고 보내주세요.\n[관리자만 가능합니다]")
-
-    def get_leave_detail(self, user_id: str, room_id: Optional[str] = None) -> Optional[PendingLeave]:
+            if mid not in self.messages:self._message_order.append(mid)
+            self.messages[mid]=item
+            if readers is not None:
+                for x in readers:self.record_read(mid,x)
+            if isinstance(raw,dict):item["raw_keys"]=list(raw)[:100]
+            while len(self._message_order)>self.max_messages:self.messages.pop(self._message_order.popleft(),None)
+        self._save();return dict(item)
+    def record_session_diagnostic(self,user_id,session_id,status,error_code=None,detail=None):
+        with self._lock:self.session_diagnostics.append(SessionDiagnostic(str(user_id),str(session_id) if session_id else None,self._now(),str(status),str(error_code) if error_code else None,str(detail) if detail else None))
+        self._save()
+    def diagnose_999(self,user_id):
+        uid=str(user_id)
+        with self._lock:last=next((x for x in reversed(self.session_diagnostics) if x.user_id==uid),None);n=sum(x.user_id==uid for x in self.session_diagnostics)
+        return {"user_id":uid,"observations":n,"last_status":last.status if last else None,"last_error_code":last.error_code if last else None,"last_session_id":last.session_id if last else None,"recommendation":"Use the real OAuth/server response for diagnosis; authentication failures are not converted to success."}
+    def leave_message(self,nickname,left_at):
+        try:t=datetime.fromisoformat(str(left_at).replace("Z","+00:00")).astimezone().strftime("%H시 %M분")
+        except ValueError:t=str(left_at)
+        return f"{nickname}님이 나가셨습니다.\n\n[전체보기]\n\n{nickname} 님이 {t}에 나가셨습니다.\n나간사람을 내보내실려면 이 메시지에 답장으로 kick이라고 보내주세요.\n[관리자만 가능합니다]"
+    def get_leave_detail(self,user_id,room_id=None):
+        uid=str(user_id)
+        with self._lock:return self.pending_leaves.get(self._key(str(room_id),uid)) if room_id is not None else next((x for x in reversed(tuple(self.pending_leaves.values())) if x.user_id==uid),None)
+    def departed(self,room_id=None):
+        rid=str(room_id) if room_id is not None else None
+        with self._lock:rows=[asdict(x) for x in self.pending_leaves.values() if rid is None or x.room_id==rid]
+        return sorted(rows,key=lambda x:x["left_at"],reverse=True)
+    def online_members(self,room_id):
+        p=str(room_id)+"\x1f"
+        with self._lock:return [dict(v) for k,v in self.online.items() if str(k).startswith(p)]
+    def get_readers(self,message_id):
+        with self._lock:return [{"user_id":k,"nickname":v} for k,v in self.reads.get(str(message_id),{}).items()]
+    def events_for_room(self,room_id,event=None,limit=100):
+        rid,kind=str(room_id),str(event or "").upper();limit=max(1,min(1000,int(limit)))
+        with self._lock:r=[asdict(x) for x in self.events if x.room_id==rid and (not kind or x.event==kind)]
+        return r[-limit:][::-1]
+    def chat_rank(self,room_id,limit=20):
+        rid=str(room_id);c=Counter();names={}
         with self._lock:
-            if room_id is not None: return self.pending_leaves.get(self._member_key(str(room_id), str(user_id)))
-            return next((leave for leave in reversed(tuple(self.pending_leaves.values())) if leave.user_id == str(user_id)), None)
+            for x in self.messages.values():
+                if str(x.get("room_id"))==rid:c[str(x.get("user_id",""))]+=1;names[str(x.get("user_id",""))]=str(x.get("nickname",""))
+        return [{"rank":i,"user_id":u,"nickname":names.get(u,""),"messages":n} for i,(u,n) in enumerate(c.most_common(max(1,min(100,int(limit)))),1)]
+    def stats(self,room_id=None):
+        if room_id is not None:
+            rid=str(room_id);s=self._room_stats.get(rid,{})
+            with self._lock:msgs=sum(str(x.get("room_id"))==rid for x in self.messages.values())
+            return {"room_id":rid,"events":int(s.get("events",0)),"joins":int(s.get("join",0)),"leaves":int(s.get("leave",0)),"kicks":int(s.get("kick",0)),"online":len(self.online_members(rid)),"messages":msgs}
+        with self._lock:return {"events":len(self.events),"joins":sum(x.event=="JOIN" for x in self.events),"leaves":sum(x.event=="LEAVE" for x in self.events),"kicks":sum(x.event=="KICK" for x in self.events),"online":len(self.online),"messages":len(self.messages),"reads":len(self.reads),"diagnostics":len(self.session_diagnostics)}
+    def snapshot(self,room_id=None):
+        return {"version":self.VERSION,"generated_at":self._now(),"stats":self.stats(room_id),"online":self.online_members(room_id) if room_id is not None else list(self.online.values()),"events":self.events_for_room(room_id,limit=100) if room_id is not None else [asdict(x) for x in list(self.events)[-100:]][::-1],"departed":self.departed(room_id)[:100]}
+    def is_admin(self,actor_user_id,admins):return str(actor_user_id) in {str(x) for x in admins}
+    def kick_request(self,actor_user_id,target_user_id,admins,room_id=None):
+        actor,target=str(actor_user_id),str(target_user_id)
+        if not self.is_admin(actor,admins):return {"ok":False,"allowed":False,"reason":"admin_required"}
+        if not target:return {"ok":False,"allowed":True,"reason":"target_required"}
+        if room_id is not None and self._key(str(room_id),target) not in self.online:return {"ok":False,"allowed":True,"reason":"target_not_online"}
+        return {"ok":True,"allowed":True,"action":"KICK","room_id":str(room_id) if room_id is not None else None,"target_user_id":target}
+    def health(self):
+        with self._lock:return {"ok":True,"version":self.VERSION,"file":str(self.data_file),"events":len(self.events),"messages":len(self.messages),"online":len(self.online),"reads":len(self.reads),"dirty":self._dirty,"worker_alive":self._worker.is_alive()}
+    def __enter__(self):return self
+    def __exit__(self,*_):self.close()
 
-    def is_admin(self, actor_user_id: str, admins: List[str]) -> bool:
-        return str(actor_user_id) in {str(x) for x in admins}
-
-    def kick_request(self, actor_user_id: str, target_user_id: str, admins: List[str], room_id: Optional[str] = None) -> Dict[str, object]:
-        if not self.is_admin(actor_user_id, admins): return {"ok": False, "reason": "ADMIN_ONLY"}
-        target = self.get_leave_detail(target_user_id, room_id)
-        if not target: return {"ok": False, "reason": "TARGET_NOT_FOUND"}
-        return {"ok": True, "action": "KICK_REQUEST", "room_id": target.room_id, "target_user_id": target.user_id, "target_nickname": target.nickname}
-
-    def room_members(self, room_id: str) -> List[Dict[str, str]]:
-        with self._lock: return list(self._room_members.get(str(room_id), {}).values())
-
-    def room_events(self, room_id: str, limit: int = 100) -> List[MemberEvent]:
-        with self._lock:
-            limit = max(0, int(limit))
-            if not limit: return []
-            return list(self._room_events.get(str(room_id), ())) [-limit:]
-
-    def stats(self, room_id: Optional[str] = None) -> Dict[str, int]:
-        with self._lock:
-            if room_id is None: return {**self._global_stats, "online": len(self.online)}
-            rid = str(room_id); room = self._room_stats.get(rid, {"events": 0, "joins": 0, "leaves": 0})
-            return {"events": room["events"], "joins": room["joins"], "leaves": room["leaves"],
-                    "reads": len(self.reads), "online": len(self._room_members.get(rid, {})), "diagnostics": len(self.session_diagnostics)}
+__all__=["LocoAnalyzer","MemberEvent","PendingLeave","SessionDiagnostic"]
