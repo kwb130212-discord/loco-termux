@@ -1,6 +1,7 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { Socket } from 'node:net';
 import { randomInt } from 'node:crypto';
