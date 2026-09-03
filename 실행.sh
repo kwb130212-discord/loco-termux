@@ -13,7 +13,6 @@ cd "$(dirname "$0")" || exit 1
 
 export PYTHONIOENCODING="utf-8"
 export PYTHONUNBUFFERED="1"
-# Do not let an unhandled Promise rejection terminate Node before the application guard can log it.
 case " ${NODE_OPTIONS:-} " in
   *" --unhandled-rejections="*) ;;
   *) export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--unhandled-rejections=warn" ;;
@@ -53,7 +52,6 @@ bootstrap_tools() {
 prepare() {
   bootstrap_tools || return 1
 
-  # package-lock and node_modules must agree before building/running.
   if [ ! -f package-lock.json ] || [ ! -d node_modules ]; then
     log "의존성 설치/복구 중..."
     npm install || return 1
@@ -64,6 +62,8 @@ prepare() {
 
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
+    rebuild=1
+  elif [ ! -f dist/openchat-main.js ]; then
     rebuild=1
   elif find src -type f -name '*.ts' -newer dist/termux-panel.js | grep -q .; then
     rebuild=1
@@ -81,6 +81,7 @@ prepare() {
   fi
 
   [ -f dist/termux-panel.js ] || { log "dist/termux-panel.js 생성 실패"; return 1; }
+  [ -f dist/openchat-main.js ] || { log "dist/openchat-main.js 생성 실패"; return 1; }
   return 0
 }
 
@@ -89,13 +90,17 @@ trap 'cleanup; log "종료 신호 수신 — 종료"; exit 0' INT TERM EXIT
 
 acquire_wake_lock
 
-# Outer supervisor: application crash, fatal library error, or unexpected exit
-# never becomes a permanent stop while this shell/Termux process is alive.
 while true; do
   if ! prepare; then
     log "준비 단계 실패 — 5초 후 재시도"
     sleep 5
     continue
+  fi
+
+  if [ -f "$HOME/.loco-termux/kakaoforge-auth.json" ]; then
+    log "KakaoForge 인증 세션 확인 — 로그인 후 OpenChat 실구동 자동 연결 준비 완료"
+  else
+    log "인증 세션 없음 — Control Center에서 QR 로그인부터 진행"
   fi
 
   log "LOCO-Termux Control Center 시작..."
