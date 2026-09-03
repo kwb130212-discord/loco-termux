@@ -1,7 +1,8 @@
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
+import { Socket } from 'node:net';
 
 const KAKAO_FORGE_REPO = 'https://github.com/minjaemin2020/KakaoForge.git';
 const KAKAO_FORGE_COMMIT = '4b774ea40b1347280fadb685415436584093118b';
@@ -150,6 +151,69 @@ function roomItems(result: any): RoomRef[] {
   })).filter((item: RoomRef) => item.id && item.name);
 }
 
+function batteryPercent(): number | null {
+  try {
+    const raw = execFileSync('termux-battery-status', { encoding: 'utf8', timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'] });
+    const parsed = JSON.parse(raw) as AnyBattery;
+    const value = Number(parsed?.percentage);
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, Math.round(value))) : null;
+  } catch {
+    return null;
+  }
+}
+
+type AnyBattery = { percentage?: number };
+
+function pingMs(host = 'ticket-loco.kakao.com', port = 443): Promise<number | null> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = new Socket();
+    let settled = false;
+    const finish = (value: number | null) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(value);
+    };
+    socket.setTimeout(2500, () => finish(null));
+    socket.once('error', () => finish(null));
+    socket.connect(port, host, () => finish(Date.now() - started));
+  });
+}
+
+function uptimeText(seconds = process.uptime()): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  return days ? `${days}일 ${hours}시간 ${minutes}분` : hours ? `${hours}시간 ${minutes}분` : `${minutes}분 ${secs}초`;
+}
+
+function koreaClock(): string {
+  return new Intl.DateTimeFormat('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date());
+}
+
+async function botStatusText(client: any, roomName: string, logPath: string): Promise<string> {
+  const [ping, battery] = await Promise.all([pingMs(), Promise.resolve(batteryPercent())]);
+  const batteryText = battery == null ? 'N/A' : `${battery}%`;
+  console.log(`SKT ${koreaClock()} >_ 📳 🔋 ${batteryText}`);
+  return [
+    '| LOCO-TERMUX / BOT STATUS |',
+    `런타임: ${client.connected ? '🟢 RUNNING' : '🔴 DISCONNECTED'}`,
+    `PID: ${process.pid} 자동실행: ON`,
+    `인증: ${client.userId ? 'OK' : 'CHECK'}`,
+    `핑: ${ping == null ? 'N/A' : `${ping}ms`}`,
+    `배터리: ${batteryText}`,
+    `업타임: ${uptimeText()}`,
+    `전송계층: ${client.transport || 'unknown'}`,
+    `사용자 ID: ${client.userId || '-'}`,
+    `방: ${roomName || '현재 방'}`,
+    `메모리: ${Math.round(process.memoryUsage().rss / 1024 / 1024)}MB RSS`,
+    `로그: ${logPath}`,
+  ].join('\n');
+}
+
 /** The application uses room_name as a human-friendly room reference, while callbacks preserve the raw room_id. */
 function wrapRoomNameRuntime(client: any): any {
   const originalGetChatRooms = typeof client.getChatRooms === 'function' ? client.getChatRooms.bind(client) : null;
@@ -195,7 +259,6 @@ function wrapRoomNameRuntime(client: any): any {
     if (!chat || typeof chat !== 'object') return chat;
     return new Proxy(chat, {
       get(target, prop, receiver) {
-        // Keep .id/.chatId as the real room identifier. sendText/openChatKick still accept room names.
         if (prop === 'id' || prop === 'chatId') return String(target.id ?? target.chatId ?? '');
         if (prop === 'name' || prop === 'roomName' || prop === 'title') return forcedName || byId.get(String(target.id ?? target.chatId ?? '')) || target[prop as keyof typeof target];
         if (prop === 'sendText' && typeof target.sendText === 'function') {
@@ -231,6 +294,16 @@ function wrapRoomNameRuntime(client: any): any {
   if (originalOnMessage) {
     client.onMessage = (handler: any) => originalOnMessage(async (chat: any, msg: any) => {
       const mapped = await adaptMessage(msg, chat);
+      const incomingText = String(mapped.msg?.message?.text ?? mapped.msg?.text ?? '').trim().toLowerCase();
+      if (incomingText === '!봇상태') {
+        try {
+          const status = await botStatusText(client, String(mapped.chat?.name ?? mapped.chat?.roomName ?? ''), join(process.env.HOME || homedir(), '.loco-termux', 'openchat.log'));
+          await mapped.chat.sendText(String(mapped.msg?.room?.id ?? mapped.msg?.roomId ?? mapped.msg?.chatId ?? mapped.chat?.id ?? ''), status);
+        } catch (error) {
+          console.error('[BOT-STATUS]', error instanceof Error ? error.stack || error.message : String(error));
+        }
+        return;
+      }
       return handler(mapped.chat, mapped.msg);
     });
   }
