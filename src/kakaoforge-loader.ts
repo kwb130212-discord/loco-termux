@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -44,6 +44,48 @@ function resolvePackageRoot(): string {
   throw new Error('KakaoForge is not installed. Run "npm install" and retry.');
 }
 
+function ensureBuildConfig(packageRoot: string): void {
+  const tsconfigPath = join(packageRoot, 'tsconfig.json');
+  if (existsSync(tsconfigPath)) return;
+
+  // npm can install a Git dependency as a packed package. KakaoForge's
+  // package.json intentionally publishes only dist/ and README.md, so the
+  // source checkout's tsconfig.json may be omitted even when src/ is present.
+  // Recreate the known build config locally instead of failing with TS5058.
+  const sourceEntry = join(packageRoot, 'src', 'index.ts');
+  if (!existsSync(sourceEntry)) {
+    throw new Error('KakaoForge source files are missing from the installed package; reinstall the pinned Git dependency.');
+  }
+
+  writeFileSync(
+    tsconfigPath,
+    JSON.stringify(
+      {
+        compilerOptions: {
+          target: 'ES2020',
+          module: 'CommonJS',
+          moduleResolution: 'Node',
+          rootDir: 'src',
+          outDir: 'dist',
+          declaration: true,
+          esModuleInterop: true,
+          skipLibCheck: true,
+          forceConsistentCasingInFileNames: true,
+          resolveJsonModule: true,
+          strict: false,
+          removeComments: true,
+        },
+        include: ['src/**/*.ts'],
+      },
+      null,
+      2,
+    ) + '\n',
+    'utf8',
+  );
+
+  console.log('[KakaoForge] restored missing tsconfig.json for the source build.');
+}
+
 function buildKakaoForge(packageRoot: string): void {
   const distEntry = join(packageRoot, 'dist', 'index.js');
   if (existsSync(distEntry)) return;
@@ -67,6 +109,8 @@ function buildKakaoForge(packageRoot: string): void {
   if (install.status !== 0) {
     throw new Error(`KakaoForge dependency installation failed (exit ${install.status ?? 1}).`);
   }
+
+  ensureBuildConfig(packageRoot);
 
   const build = spawnSync(npm, ['run', 'build'], {
     cwd: packageRoot,
