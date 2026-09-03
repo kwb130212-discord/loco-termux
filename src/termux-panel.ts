@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 const C = { reset: '\x1b[0m', cyan: '\x1b[36m', blue: '\x1b[34m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', white: '\x1b[37m', dim: '\x1b[2m', bold: '\x1b[1m' };
@@ -77,10 +77,23 @@ async function exportData(departed = false) {
   await pause();
 }
 
-function launch(command: string, args: string[] = []) {
-  console.log(`${C.green}▶ ${command} 실행${C.reset}`);
-  const child = spawn(command, args, { stdio: 'inherit', env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' } });
-  child.on('error', e => console.error(`${C.red}${e.message}${C.reset}`));
+/**
+ * Run a child process in the foreground.
+ * The previous implementation used spawn() and immediately returned to the
+ * parent menu. That left both the parent readline and the child process
+ * competing for Termux stdin, which could make QR login appear to hang or
+ * disappear. Login/runtime commands must own stdin exclusively until exit.
+ */
+async function launch(command: string, args: string[] = []) {
+  console.log(`${C.green}▶ ${command} ${args.join(' ')} 실행${C.reset}`);
+  const result = spawnSync(command, args, {
+    stdio: 'inherit',
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+  });
+  if (result.error) console.error(`${C.red}${result.error.message}${C.reset}`);
+  if (result.status !== 0 && result.status !== null) {
+    console.error(`${C.red}프로세스 종료 코드: ${result.status}${C.reset}`);
+  }
 }
 
 async function loginMenu() {
@@ -89,11 +102,11 @@ async function loginMenu() {
   console.log('2. 기존 로그인/상태 패널 열기');
   console.log('3. 돌아가기');
   const c = await ask('선택 > ');
-  if (c === '1') { launch('npm', ['run', 'login:qr']); await pause(); }
-  else if (c === '2') { launch('node', ['dist/bridge-main.js']); await pause(); }
+  if (c === '1') { await launch('npm', ['run', 'login:qr']); await pause(); }
+  else if (c === '2') { await launch('node', ['dist/bridge-main.js']); await pause(); }
 }
 
-function mainMenu() {
+async function mainMenu() {
   clear();
   title('LOCO-TERMUX  /  CONTROL CENTER');
   console.log(`${C.green}●${C.reset} 서비스 패널   ${C.dim}Room / Member / Read / Export / Auth${C.reset}\n`);
@@ -119,7 +132,7 @@ function mainMenu() {
 
 async function main() {
   while (true) {
-    mainMenu();
+    await mainMenu();
     const c = await ask('\nLOCO > ');
     if (c === '0' || c.toLowerCase() === 'exit') return;
     if (c === '1') await loginMenu();
@@ -132,8 +145,8 @@ async function main() {
     else if (c === '8') await readers();
     else if (c === '9') await exportData(false);
     else if (c === '10') await exportData(true);
-    else if (c === '11') launch('npm', ['run', 'start:openchat']);
-    else if (c === '12') launch('node', ['dist/bridge-main.js']);
+    else if (c === '11') { await launch('npm', ['run', 'start:openchat']); await pause(); }
+    else if (c === '12') { await launch('node', ['dist/bridge-main.js']); await pause(); }
     else { console.log(`${C.yellow}없는 메뉴입니다.${C.reset}`); await pause(); }
   }
 }
