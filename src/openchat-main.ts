@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomInt } from 'node:crypto';
 import { createClient, getMemberType } from './kakaoforge-runtime';
-import type { MessageEvent, MemberEvent, KakaoForgeClient } from 'kakaoforge';
+import type { MessageEvent, MemberEvent, KakaoForgeClient } from './kakaoforge-types';
 
 type State = Record<string, any>;
 type EventKind = 'JOIN' | 'LEAVE' | 'KICK';
@@ -28,7 +28,7 @@ function developerId(client: KakaoForgeClient): string { if (OWNER) return OWNER
 function isAdmin(client: KakaoForgeClient, message: MessageEvent, room: State): boolean { const uid = userIdOf(message); return uid === developerId(client) || isRoomManager(message) || Boolean(room.admins?.[uid]); }
 function chunks(value: string, size = 1_800): string[] { const result: string[] = []; for (let i = 0; i < value.length; i += size) result.push(value.slice(i, i + size)); return result.length ? result : ['']; }
 async function send(chat: any, roomId: string | number, value: string): Promise<void> { for (const part of chunks(value)) await chat.sendText(roomId, part); }
-function recordMemberEvent(type: EventKind, event: MemberEvent): State[] { const state = load(STATE); const history = Array.isArray(state.memberEvents) ? state.memberEvents : []; const ids = event.member?.ids ?? []; const names = event.member?.names ?? []; const rows = ids.map((id, index) => ({ type, at: new Date().toISOString(), roomId: String(event.room.id), roomName: event.room.name, userId: String(id), nickname: names[index] || names[0] || '알 수 없음' })); if (!rows.length) return []; history.push(...rows); save(STATE, { ...state, memberEvents: history.slice(-MAX_EVENTS), lastMemberEvent: rows.at(-1), updatedAt: new Date().toISOString() }); return rows; }
+function recordMemberEvent(type: EventKind, event: MemberEvent): State[] { const state = load(STATE); const history = Array.isArray(state.memberEvents) ? state.memberEvents : []; const ids = event.member?.ids ?? []; const names = event.member?.names ?? []; const rows = ids.map((id: string | number, index: number) => ({ type, at: new Date().toISOString(), roomId: String(event.room.id), roomName: event.room.name, userId: String(id), nickname: names[index] || names[0] || '알 수 없음' })); if (!rows.length) return []; history.push(...rows); save(STATE, { ...state, memberEvents: history.slice(-MAX_EVENTS), lastMemberEvent: rows.at(-1), updatedAt: new Date().toISOString() }); return rows; }
 function memberRows(roomId: string, type?: EventKind): State[] { const history = load(STATE).memberEvents; if (!Array.isArray(history)) return []; return history.filter((row: State) => String(row.roomId) === roomId && (!type || row.type === type)); }
 function departed(roomId: string): State[] { const seen = new Set<string>(); return memberRows(roomId, 'LEAVE').reverse().filter((row) => { if (seen.has(row.userId)) return false; seen.add(row.userId); return true; }); }
 function fmt(value: string): string { return new Date(value).toLocaleString('ko-KR', { hour12: false }); }
