@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -63,99 +63,78 @@ function run(command: string, args: string[], cwd: string): void {
   }
 }
 
-function restoreSourceCheckout(packageRoot: string): void {
-  const sourceEntry = join(packageRoot, 'src', 'index.ts');
-  if (existsSync(sourceEntry)) return;
-
-  // npm may install a Git dependency as its packed npm artifact. KakaoForge's
-  // package.json publishes only dist/ and README.md, so the source tree can be
-  // absent even though npm successfully installed the dependency. Rehydrate
-  // the exact pinned source revision directly from GitHub in that case.
-  const parent = dirname(packageRoot);
-  const checkoutRoot = join(parent, '.kakaoforge-source');
-  const git = process.platform === 'win32' ? 'git.exe' : 'git';
-
-  console.log('[KakaoForge] source tree is missing; restoring the pinned Git revision...');
-
-  if (existsSync(checkoutRoot)) {
-    rmSync(checkoutRoot, { recursive: true, force: true });
-  }
-  mkdirSync(parent, { recursive: true });
-
-  run(git, ['clone', '--filter=blob:none', KAKAO_FORGE_REPO, checkoutRoot], parent);
-  run(git, ['checkout', '--detach', KAKAO_FORGE_COMMIT], checkoutRoot);
-
-  const restoredSource = join(checkoutRoot, 'src');
-  const restoredPackage = join(checkoutRoot, 'package.json');
-  if (!existsSync(join(restoredSource, 'index.ts')) || !existsSync(restoredPackage)) {
-    throw new Error('Pinned KakaoForge checkout is incomplete.');
-  }
-
-  // Replace the packed dependency contents with the real source checkout while
-  // preserving node_modules as the stable package location used by createRequire.
-  const keep = new Set(['node_modules']);
-  for (const entry of readdirSync(packageRoot)) {
-    if (!keep.has(entry)) {
-      rmSync(join(packageRoot, entry), { recursive: true, force: true });
-    }
-  }
-
-  run('cp', ['-a', `${checkoutRoot}/.`, packageRoot], parent);
-}
-
-function ensureBuildConfig(packageRoot: string): void {
-  const tsconfigPath = join(packageRoot, 'tsconfig.json');
+function writeBuildConfig(buildRoot: string): void {
+  const tsconfigPath = join(buildRoot, 'tsconfig.json');
   if (existsSync(tsconfigPath)) return;
-
-  const sourceEntry = join(packageRoot, 'src', 'index.ts');
-  if (!existsSync(sourceEntry)) {
-    throw new Error('KakaoForge source files are missing even after source restoration.');
-  }
-
   writeFileSync(
     tsconfigPath,
-    JSON.stringify(
-      {
-        compilerOptions: {
-          target: 'ES2020',
-          module: 'CommonJS',
-          moduleResolution: 'Node',
-          rootDir: 'src',
-          outDir: 'dist',
-          declaration: true,
-          esModuleInterop: true,
-          skipLibCheck: true,
-          forceConsistentCasingInFileNames: true,
-          resolveJsonModule: true,
-          strict: false,
-          removeComments: true,
-        },
-        include: ['src/**/*.ts'],
+    JSON.stringify({
+      compilerOptions: {
+        target: 'ES2020',
+        module: 'CommonJS',
+        moduleResolution: 'Node',
+        rootDir: 'src',
+        outDir: 'dist',
+        declaration: true,
+        esModuleInterop: true,
+        skipLibCheck: true,
+        forceConsistentCasingInFileNames: true,
+        resolveJsonModule: true,
+        strict: false,
+        removeComments: true,
       },
-      null,
-      2,
-    ) + '\n',
+      include: ['src/**/*.ts'],
+    }, null, 2) + '\n',
     'utf8',
   );
-  console.log('[KakaoForge] restored missing tsconfig.json for the source build.');
+}
+
+function clonePinnedSource(buildRoot: string): void {
+  if (existsSync(join(buildRoot, 'src', 'index.ts'))) return;
+  const parent = dirname(buildRoot);
+  mkdirSync(parent, { recursive: true });
+  if (existsSync(buildRoot)) rmSync(buildRoot, { recursive: true, force: true });
+
+  console.log('[KakaoForge] source is not bundled by npm; cloning the pinned revision...');
+  const git = process.platform === 'win32' ? 'git.exe' : 'git';
+
+  try {
+    run(git, ['clone', '--depth', '1', KAKAO_FORGE_REPO, buildRoot], parent);
+  } catch {
+    if (existsSync(buildRoot)) rmSync(buildRoot, { recursive: true, force: true });
+    console.log('[KakaoForge] shallow clone failed; retrying with a full clone...');
+    run(git, ['clone', KAKAO_FORGE_REPO, buildRoot], parent);
+  }
+  run(git, ['checkout', '--detach', KAKAO_FORGE_COMMIT], buildRoot);
+
+  if (!existsSync(join(buildRoot, 'src', 'index.ts')) || !existsSync(join(buildRoot, 'package.json'))) {
+    throw new Error('Pinned KakaoForge checkout is incomplete.');
+  }
 }
 
 function buildKakaoForge(packageRoot: string): void {
-  restoreSourceCheckout(packageRoot);
-
   const distEntry = join(packageRoot, 'dist', 'index.js');
   if (existsSync(distEntry)) return;
 
-  console.log('[KakaoForge] dist/index.js is missing. Building the pinned source checkout...');
+  const buildRoot = join(dirname(packageRoot), '.kakaoforge-build');
+  clonePinnedSource(buildRoot);
+  writeBuildConfig(buildRoot);
 
+  console.log('[KakaoForge] building the pinned source outside node_modules...');
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  run(npm, ['install', '--include=dev', '--ignore-scripts'], packageRoot);
-  ensureBuildConfig(packageRoot);
-  run(npm, ['run', 'build'], packageRoot);
+  run(npm, ['install', '--include=dev', '--ignore-scripts'], buildRoot);
+  run(npm, ['run', 'build'], buildRoot);
 
-  if (!existsSync(distEntry)) {
+  const builtDist = join(buildRoot, 'dist');
+  if (!existsSync(join(builtDist, 'index.js'))) {
     throw new Error('KakaoForge build finished but dist/index.js was not produced.');
   }
+
+  const packageDist = join(packageRoot, 'dist');
+  if (existsSync(packageDist)) rmSync(packageDist, { recursive: true, force: true });
+  mkdirSync(packageRoot, { recursive: true });
+  cpSync(builtDist, packageDist, { recursive: true });
+  console.log('[KakaoForge] dist/index.js installed into node_modules/kakaoforge.');
 }
 
 function loadModule(): KakaoForgeModule {
