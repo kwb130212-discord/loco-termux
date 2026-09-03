@@ -2,8 +2,11 @@ import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const C = { reset: '\x1b[0m', cyan: '\x1b[36m', blue: '\x1b[34m', green: '\x1b[32m', yellow: '\x1b[33m', red: '\x1b[31m', white: '\x1b[37m', dim: '\x1b[2m', bold: '\x1b[1m' };
+const AUTH_PATH = join(homedir(), '.loco-termux', 'kakaoforge-auth.json');
 
 async function ask(prompt: string): Promise<string> {
   const rl = readline.createInterface({ input, output });
@@ -86,16 +89,42 @@ async function launch(command: string, args: string[] = []) {
   });
   if (result.error) console.error(`${C.red}${result.error.message}${C.reset}`);
   if (result.status !== 0 && result.status !== null) console.error(`${C.red}프로세스 종료 코드: ${result.status}${C.reset}`);
+  return result.status === 0;
 }
 
 async function loginMenu(): Promise<boolean> {
   clear(); title('AUTH CENTER  /  LOGIN FIRST');
-  console.log(`${C.green}●${C.reset} 로그인 완료 후 나머지 기능을 사용하는 것을 권장합니다.\n`);
-  console.log('1. QR 로그인  (기존 QR 로그인 경로 그대로 실행)');
+  const hasSavedAuth = existsSync(AUTH_PATH);
+  if (hasSavedAuth) {
+    console.log(`${C.green}●${C.reset} 저장된 KakaoForge 인증 세션을 발견했습니다.`);
+    console.log(`${C.dim}${AUTH_PATH}${C.reset}\n`);
+    console.log('1. 저장된 로그인으로 바로 연결');
+    console.log('2. QR 로그인 (새 인증)');
+    console.log('3. 기존 로그인/상태 패널 열기');
+    console.log('4. 돌아가기');
+    const c = await ask('로그인 > ');
+    if (c === '1') return true;
+    if (c === '2') {
+      const ok = await launch('npm', ['run', 'login:qr']);
+      if (!ok || !existsSync(AUTH_PATH)) { await pause(); return false; }
+      console.log(`${C.green}✓ QR 로그인 정보가 저장되었습니다. 이제 OpenChat 런타임을 시작합니다.${C.reset}`);
+      return true;
+    }
+    if (c === '3') { await launch('node', ['dist/bridge-main.js']); await pause(); return true; }
+    return false;
+  }
+
+  console.log(`${C.yellow}●${C.reset} 저장된 로그인 세션이 없습니다. 먼저 로그인해야 합니다.\n`);
+  console.log('1. QR 로그인');
   console.log('2. 기존 로그인/상태 패널 열기');
   console.log('3. 돌아가기');
   const c = await ask('로그인 > ');
-  if (c === '1') { await launch('npm', ['run', 'login:qr']); await pause(); return true; }
+  if (c === '1') {
+    const ok = await launch('npm', ['run', 'login:qr']);
+    if (!ok || !existsSync(AUTH_PATH)) { await pause(); return false; }
+    console.log(`${C.green}✓ QR 로그인 완료. 인증 세션을 유지한 채 런타임으로 넘어갑니다.${C.reset}`);
+    return true;
+  }
   if (c === '2') { await launch('node', ['dist/bridge-main.js']); await pause(); return true; }
   return false;
 }
@@ -127,7 +156,14 @@ async function mainMenu() {
 async function main() {
   // Authentication is the first screen on every fresh panel start.
   // Existing command/runtime implementations are intentionally untouched.
-  await loginMenu();
+  const loggedIn = await loginMenu();
+  if (loggedIn) {
+    // A login helper is a short-lived child process. The actual long-running
+    // connection must be handed off to the runtime before the panel continues;
+    // otherwise the terminal returns to an idle menu and the connection dies.
+    await launch('npm', ['run', 'start:openchat']);
+    await pause();
+  }
 
   while (true) {
     await mainMenu();
