@@ -35,6 +35,14 @@ release_wake_lock() {
 
 bootstrap_tools() {
   command -v pkg >/dev/null 2>&1 || { log "Termux에서 실행하세요."; return 1; }
+
+  # KakaoForge may be installed as a source-only git package. The local
+  # runtime loader can build its pinned revision, so git must be available.
+  if ! command -v git >/dev/null 2>&1; then
+    log "git 없음 → 설치"
+    pkg install -y git || return 1
+  fi
+
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     log "Node.js/npm 없음 → 설치/복구"
     pkg install -y nodejs || return 1
