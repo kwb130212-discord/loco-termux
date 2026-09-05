@@ -3,6 +3,7 @@
 # LOCO-Termux self-healing launcher
 # - bootstraps required tools
 # - repairs dependencies when node_modules is missing or package.json changed
+# - verifies/builds the pinned KakaoForge runtime before starting
 # - rebuilds stale TypeScript output
 # - keeps Termux awake when supported
 # - restarts the control center after failures
@@ -36,8 +37,6 @@ release_wake_lock() {
 bootstrap_tools() {
   command -v pkg >/dev/null 2>&1 || { log "Termux에서 실행하세요."; return 1; }
 
-  # KakaoForge may be installed as a source-only git package. The local
-  # runtime loader can build its pinned revision, so git must be available.
   if ! command -v git >/dev/null 2>&1; then
     log "git 없음 → 설치"
     pkg install -y git || return 1
@@ -67,9 +66,11 @@ prepare() {
     "$(npm_bin)" install --no-audit --no-fund || return 1
   fi
 
-  # The pinned KakaoForge revision is source-only in some git installs. The
-  # local loader repairs/builds its dist/ lazily, so npm install itself never
-  # becomes a single point of failure.
+  # Some GitHub git packages are source-only. Always verify the pinned
+  # KakaoForge revision and build its dist/ when needed before TypeScript.
+  log "KakaoForge pinned runtime 확인/복구 중..."
+  "$(npm_bin)" run build:kakaoforge || return 1
+
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
     rebuild=1
@@ -109,7 +110,7 @@ while true; do
   fi
 
   if [ -f "$HOME/.loco-termux/kakaoforge-auth.json" ]; then
-    log "KakaoForge 인증 세션 확인 — 로그인 후 OpenChat 실구동 자동 연결 준비 완료"
+    log "KakaoForge 인증 세션 확인 — OpenChat 연결 준비 완료"
   else
     log "인증 세션 없음 — Control Center에서 QR 로그인부터 진행"
   fi
