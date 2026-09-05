@@ -1,12 +1,13 @@
 {
   "name": "loco-termux-bot",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "private": true,
   "description": "Termux Android LOCO bridge with pinned KakaoForge transport and analyzer state layer",
   "main": "dist/termux-panel.js",
   "scripts": {
     "build": "tsc",
     "build:kakaoforge": "node scripts/build-kakaoforge.cjs",
+    "doctor:loco": "node scripts/check-loco-transport.cjs",
     "prepare": "npm run build:kakaoforge",
     "start": "node dist/termux-panel.js",
     "start:panel": "node dist/termux-panel.js",
