@@ -1,0 +1,16 @@
+KakaoForge transport bundle notice
+
+This project uses KakaoForge source revision:
+4b774ea40b1347280fadb685415436584093118b
+
+Upstream repository:
+https://github.com/minjaemin2020/KakaoForge
+
+Copyright (c) 2026 aodjo (https://junx.dev/)
+
+KakaoForge is licensed under the KakaoForge Non-Commercial / No Abuse License.
+The full license text is retrieved from the pinned upstream revision at setup time
+and must be preserved with any substantial copy of the source.
+
+This repository does not bypass Kakao authentication, obtain credentials from
+other devices, intercept third-party traffic, or defeat access controls.
