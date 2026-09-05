@@ -4,6 +4,7 @@
 # - bootstraps required tools
 # - repairs dependencies when node_modules is missing or package.json changed
 # - verifies/builds the pinned KakaoForge runtime before starting
+# - runs a transport doctor to catch incomplete LOCO installs
 # - rebuilds stale TypeScript output
 # - keeps Termux awake when supported
 # - restarts the control center after failures
@@ -70,6 +71,8 @@ prepare() {
   # KakaoForge revision and build its dist/ when needed before TypeScript.
   log "KakaoForge pinned runtime 확인/복구 중..."
   "$(npm_bin)" run build:kakaoforge || return 1
+  log "LOCO transport 구성요소 검사 중..."
+  "$(npm_bin)" run doctor:loco || return 1
 
   local rebuild=0
   if [ ! -f dist/termux-panel.js ]; then
