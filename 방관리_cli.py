@@ -2,8 +2,9 @@ from __future__ import annotations
 
 """Safe room-management/export CLI for LOCO-Termux.
 
-Exports only state actually observed by LOCO-Termux. No undocumented Kakao
-Open Chat REST endpoints are assumed.
+OpenChat room enumeration is limited to rooms actually observed by the
+LOCO-Termux OpenChat transport. No undocumented Kakao room-list endpoint is
+assumed, and manually configured room IDs are not treated as discovered rooms.
 """
 
 import argparse
@@ -15,6 +16,7 @@ from typing import Any
 DATA_DIR = Path.home() / ".loco-termux"
 CONFIG_FILE = DATA_DIR / "config.json"
 ANALYZER_FILE = Path("loco_analyzer.json")
+TRANSPORT_FILE = DATA_DIR / "loco-transport.json"
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -28,11 +30,15 @@ def save_config(config: dict[str, Any]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    try: tmp.chmod(0o600)
-    except OSError: pass
+    try:
+        tmp.chmod(0o600)
+    except OSError as error:
+        print(f"[WARN] config 권한 설정 실패: {error}")
     tmp.replace(CONFIG_FILE)
-    try: CONFIG_FILE.chmod(0o600)
-    except OSError: pass
+    try:
+        CONFIG_FILE.chmod(0o600)
+    except OSError as error:
+        print(f"[WARN] config 권한 설정 실패: {error}")
 
 
 def load_state() -> tuple[dict[str, Any], dict[str, Any]]:
@@ -44,11 +50,36 @@ def load_state() -> tuple[dict[str, Any], dict[str, Any]]:
 def known_rooms(config: dict[str, Any], analyzer: dict[str, Any]) -> list[str]:
     rooms = {str(x).strip() for x in config.get("rooms", []) if str(x).strip()}
     for event in analyzer.get("events", []):
-        if isinstance(event, dict) and str(event.get("room_id", "")).strip(): rooms.add(str(event["room_id"]).strip())
+        if isinstance(event, dict) and str(event.get("room_id", "")).strip():
+            rooms.add(str(event["room_id"]).strip())
     for key in analyzer.get("online", {}):
         room, _, _ = str(key).partition("\x1f")
-        if room: rooms.add(room)
+        if room:
+            rooms.add(room)
     return sorted(rooms)
+
+
+def openchat_rooms(analyzer: dict[str, Any]) -> list[dict[str, str]]:
+    """Return only rooms observed by the OpenChat transport."""
+    rooms: dict[str, str] = {}
+    for event in analyzer.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        room_id = str(event.get("room_id", "")).strip()
+        if not room_id:
+            continue
+        name = str(event.get("room_name", "")).strip()
+        rooms.setdefault(room_id, name)
+    for key, value in analyzer.get("online", {}).items():
+        room_id, _, _ = str(key).partition("\x1f")
+        room_id = room_id.strip()
+        if not room_id:
+            continue
+        name = ""
+        if isinstance(value, dict):
+            name = str(value.get("room_name", value.get("roomName", ""))).strip()
+        rooms.setdefault(room_id, name)
+    return [{"room_id": room_id, "room_name": rooms[room_id]} for room_id in sorted(rooms)]
 
 
 def list_rooms() -> int:
@@ -63,9 +94,25 @@ def list_rooms() -> int:
     return 0
 
 
+def list_openchat_ids() -> int:
+    _, analyzer = load_state()
+    rooms = openchat_rooms(analyzer)
+    ids = [row["room_id"] for row in rooms]
+    print(json.dumps({
+        "ok": True,
+        "type": "openchat",
+        "count": len(ids),
+        "rooms": rooms,
+        "room_ids": ids,
+        "comma": "," + ",".join(ids) + "," if ids else ",",
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def set_room(room: str, enabled: bool | None = None, remove: bool = False) -> int:
     config, _ = load_state(); room = str(room).strip()
-    if not room: print(json.dumps({"ok": False, "error": "room_required"})); return 2
+    if not room:
+        print(json.dumps({"ok": False, "error": "room_required"})); return 2
     rooms = [str(x) for x in config.get("rooms", []) if str(x).strip()]
     room_configs = config.setdefault("roomConfigs", {})
     if remove:
@@ -137,12 +184,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="LOCO-Termux room management/export tools")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("rooms")
+    sub.add_parser("openchat-ids", help="list only OpenChat room IDs observed by the transport")
     for name, help_text in (("add", "add room"), ("disable", "disable room"), ("enable", "enable room"), ("remove", "remove room"), ("members", "show online members"), ("readers", "show message readers")):
         p = sub.add_parser(name, help=help_text); p.add_argument("room_id" if name != "readers" else "message_id")
     for name, func in (("export", export_data), ("departed-export", export_departed)):
         p = sub.add_parser(name, help="export data"); p.add_argument("--room-id", default=""); p.add_argument("--format", choices=("json", "csv"), default="json"); p.add_argument("--output", default=f"loco-{name}.json")
     args = parser.parse_args()
     if args.command == "rooms": return list_rooms()
+    if args.command == "openchat-ids": return list_openchat_ids()
     if args.command == "add": return set_room(args.room_id, True)
     if args.command == "disable": return set_room(args.room_id, False)
     if args.command == "enable": return set_room(args.room_id, True)
