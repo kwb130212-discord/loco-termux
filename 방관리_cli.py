@@ -60,26 +60,32 @@ def known_rooms(config: dict[str, Any], analyzer: dict[str, Any]) -> list[str]:
 
 
 def openchat_rooms(analyzer: dict[str, Any]) -> list[dict[str, str]]:
-    """Return only rooms observed by the OpenChat transport."""
+    """Return OpenChat rooms observed by the transport, with their names."""
     rooms: dict[str, str] = {}
+    transport = load_json(TRANSPORT_FILE, {})
+
+    def add(room_id: Any, room_name: Any = "") -> None:
+        rid = str(room_id or "").strip()
+        if not rid:
+            return
+        name = str(room_name or "").strip()
+        if rid not in rooms or (not rooms[rid] and name):
+            rooms[rid] = name
+
+    for row in transport.get("memberEvents", []) if isinstance(transport, dict) else []:
+        if isinstance(row, dict):
+            add(row.get("roomId"), row.get("roomName"))
+
     for event in analyzer.get("events", []):
-        if not isinstance(event, dict):
-            continue
-        room_id = str(event.get("room_id", "")).strip()
-        if not room_id:
-            continue
-        name = str(event.get("room_name", "")).strip()
-        rooms.setdefault(room_id, name)
+        if isinstance(event, dict):
+            add(event.get("room_id"), event.get("room_name") or event.get("roomName"))
+
     for key, value in analyzer.get("online", {}).items():
         room_id, _, _ = str(key).partition("\x1f")
-        room_id = room_id.strip()
-        if not room_id:
-            continue
-        name = ""
-        if isinstance(value, dict):
-            name = str(value.get("room_name", value.get("roomName", ""))).strip()
-        rooms.setdefault(room_id, name)
-    return [{"room_id": room_id, "room_name": rooms[room_id]} for room_id in sorted(rooms)]
+        name = value.get("room_name", value.get("roomName", "")) if isinstance(value, dict) else ""
+        add(room_id, name)
+
+    return [{"room_id": rid, "room_name": rooms[rid] or "알 수 없음"} for rid in sorted(rooms)]
 
 
 def list_rooms() -> int:
@@ -97,15 +103,8 @@ def list_rooms() -> int:
 def list_openchat_ids() -> int:
     _, analyzer = load_state()
     rooms = openchat_rooms(analyzer)
-    ids = [row["room_id"] for row in rooms]
-    print(json.dumps({
-        "ok": True,
-        "type": "openchat",
-        "count": len(ids),
-        "rooms": rooms,
-        "room_ids": ids,
-        "comma": "," + ",".join(ids) + "," if ids else ",",
-    }, ensure_ascii=False, indent=2))
+    for row in rooms:
+        print(f"{row['room_name']}:{row['room_id']}")
     return 0
 
 
@@ -184,10 +183,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="LOCO-Termux room management/export tools")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("rooms")
-    sub.add_parser("openchat-ids", help="list only OpenChat room IDs observed by the transport")
+    sub.add_parser("openchat-ids", help="list OpenChat rooms as room_name:room_id")
     for name, help_text in (("add", "add room"), ("disable", "disable room"), ("enable", "enable room"), ("remove", "remove room"), ("members", "show online members"), ("readers", "show message readers")):
         p = sub.add_parser(name, help=help_text); p.add_argument("room_id" if name != "readers" else "message_id")
-    for name, func in (("export", export_data), ("departed-export", export_departed)):
+    for name in ("export", "departed-export"):
         p = sub.add_parser(name, help="export data"); p.add_argument("--room-id", default=""); p.add_argument("--format", choices=("json", "csv"), default="json"); p.add_argument("--output", default=f"loco-{name}.json")
     args = parser.parse_args()
     if args.command == "rooms": return list_rooms()
