@@ -17,45 +17,60 @@ function roomDir(roomId: string): string {
   return join(ROOT, safe);
 }
 
-function dbPath(roomId: string): string {
-  return join(roomDir(roomId), 'departed.json');
-}
-
-function load(roomId: string): DepartedRow[] {
+function readRows(path: string): DepartedRow[] {
   try {
-    const value = JSON.parse(readFileSync(dbPath(roomId), 'utf8'));
+    const value = JSON.parse(readFileSync(path, 'utf8'));
     return Array.isArray(value) ? value : [];
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : '';
-    if (code !== 'ENOENT') console.error(`[DEPARTED-DB] ${roomId} 읽기 실패:`, error instanceof Error ? error.message : String(error));
+    if (code !== 'ENOENT') console.error(`[DEPARTED-DB] ${path} 읽기 실패:`, error instanceof Error ? error.message : String(error));
     return [];
   }
 }
 
-function save(roomId: string, rows: DepartedRow[]): void {
-  mkdirSync(roomDir(roomId), { recursive: true, mode: 0o700 });
-  writeFileSync(dbPath(roomId), JSON.stringify(rows, null, 2), { encoding: 'utf8', mode: 0o600 });
+function writeRows(path: string, rows: DepartedRow[]): void {
+  mkdirSync(join(path, '..'), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(rows, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+function paths(roomId: string): { current: string; history: string } {
+  const dir = roomDir(roomId);
+  return { current: join(dir, 'departed.json'), history: join(dir, 'leave-log.json') };
 }
 
 export function recordDepartures(roomId: string, roomName: string, ids: Array<string | number>, names: string[]): void {
   if (!ids.length) return;
-  const rows = load(roomId);
+  const { current, history } = paths(roomId);
+  const currentRows = readRows(current);
+  const historyRows = readRows(history);
   const now = new Date().toISOString();
+  const added: DepartedRow[] = [];
   for (let i = 0; i < ids.length; i += 1) {
-    const userId = String(ids[i]);
-    const nickname = String(names[i] || names[0] || '알 수 없음');
-    const index = rows.findIndex((row) => row.userId === userId);
-    const row: DepartedRow = { userId, nickname, roomId: String(roomId), roomName, leftAt: now };
-    if (index >= 0) rows[index] = row;
-    else rows.push(row);
+    const row: DepartedRow = {
+      userId: String(ids[i]),
+      nickname: String(names[i] || names[0] || '알 수 없음'),
+      roomId: String(roomId),
+      roomName,
+      leftAt: now,
+    };
+    const index = currentRows.findIndex((item) => item.userId === row.userId);
+    if (index >= 0) currentRows[index] = row;
+    else currentRows.push(row);
+    added.push(row);
   }
-  save(roomId, rows);
+  writeRows(current, currentRows);
+  writeRows(history, [...historyRows, ...added].slice(-10000));
 }
 
 export function listDeparted(roomId: string): DepartedRow[] {
-  return load(roomId).sort((a, b) => Date.parse(b.leftAt) - Date.parse(a.leftAt));
+  return readRows(paths(roomId).current).sort((a, b) => Date.parse(b.leftAt) - Date.parse(a.leftAt));
+}
+
+export function listLeaveHistory(roomId: string): DepartedRow[] {
+  return readRows(paths(roomId).history).sort((a, b) => Date.parse(b.leftAt) - Date.parse(a.leftAt));
 }
 
 export function removeDeparted(roomId: string, userId: string): void {
-  save(roomId, load(roomId).filter((row) => row.userId !== String(userId)));
+  const path = paths(roomId).current;
+  writeRows(path, readRows(path).filter((row) => row.userId !== String(userId)));
 }
