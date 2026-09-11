@@ -19,6 +19,7 @@
     "login:qr": "node dist/qr-login.js",
     "login:loco": "node dist/qr-login.js",
     "rooms": "python3 방관리_cli.py rooms",
+    "rooms:openchat": "python3 방관리_cli.py openchat-ids",
     "room:add": "python3 방관리_cli.py add",
     "room:enable": "python3 방관리_cli.py enable",
     "room:disable": "python3 방관리_cli.py disable",
