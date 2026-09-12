@@ -21,7 +21,7 @@ class CommandHandler:
     HELP = "\n".join([
         "!명령어", "!핑", "!봇정보", "!봇상태", "!채팅순위", "!입퇴장로그",
         "!퇴장로그 전체출력", "!나간사람", "!나간사람 올킥", "!읽은사람 <메시지ID>",
-        "!kick @유저",
+        "!kick <유저ID>",
     ])
 
     def __init__(self, analyzer: LocoAnalyzer, transport: Transport):
@@ -61,11 +61,11 @@ class CommandHandler:
                 ctx.reply("관리자만 사용할 수 있습니다."); return True
             target = parts[1].lstrip("@")
             try:
-                self.transport.send(ctx.room_id, f"__KICK_REQUEST__:{target}")
+                self.transport.kick(ctx.room_id, target)
                 remove_departed(ctx.room_id, target)
-                ctx.reply(f"kick 요청 전송: {target}")
+                ctx.reply(f"kick 요청 완료: {target}")
             except Exception as exc:
-                ctx.reply(f"kick 요청 실패: {exc}")
+                ctx.reply(f"kick 실패: {exc}")
             return True
         return False
 
@@ -75,7 +75,7 @@ class CommandHandler:
         success = 0; failed = 0
         for row in rows:
             try:
-                self.transport.send(ctx.room_id, f"__KICK_REQUEST__:{row['user_id']}")
+                self.transport.kick(ctx.room_id, str(row["user_id"]))
                 remove_departed(ctx.room_id, str(row["user_id"]))
                 success += 1
             except Exception:
