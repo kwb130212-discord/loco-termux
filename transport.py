@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Protocol
 
 
 @dataclass(frozen=True)
@@ -17,16 +17,12 @@ class RoomEvent:
 
 
 class Transport(Protocol):
-    """Documented boundary for a legitimate message transport.
-
-    This module deliberately does not implement KakaoTalk's private client
-    protocol or attempt to bypass authentication, anti-abuse controls, or
-    undocumented security mechanisms.
-    """
+    """Boundary for a legitimate, documented/authorized message transport."""
 
     def start(self, on_event: Callable[[RoomEvent], None]) -> None: ...
     def stop(self) -> None: ...
     def send(self, room_id: str, text: str) -> None: ...
+    def kick(self, room_id: str, user_id: str) -> None: ...
 
 
 class UnavailableTransport:
@@ -38,3 +34,6 @@ class UnavailableTransport:
 
     def send(self, room_id: str, text: str) -> None:
         raise RuntimeError("실시간 메시지 transport가 연결되지 않았습니다.")
+
+    def kick(self, room_id: str, user_id: str) -> None:
+        raise RuntimeError("현재 transport에는 kick 기능이 연결되지 않았습니다.")
