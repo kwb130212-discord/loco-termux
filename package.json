@@ -2,11 +2,12 @@
   "name": "loco-termux-bot",
   "version": "1.6.6",
   "private": true,
-  "description": "Termux Android LOCO bridge with pinned KakaoForge transport and analyzer state layer",
+  "description": "Termux Android LOCO bridge with loco-protocol-kotlin backend adapter",
   "main": "dist/termux-panel.js",
   "scripts": {
     "build": "tsc",
     "build:kakaoforge": "node scripts/build-kakaoforge.cjs",
+    "setup:protocol": "bash scripts/setup-loco-protocol-kotlin.sh",
     "doctor:loco": "node scripts/check-loco-transport.cjs",
     "prepare": "npm run build:kakaoforge",
     "start": "node dist/termux-panel.js",
@@ -38,7 +39,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/qrcode-terminal": "^0.12.2",
+    "@types/qrcode-terminal": "^0.12.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
