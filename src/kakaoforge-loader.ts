@@ -441,7 +441,7 @@ function wrapRoomNameRuntime(client: any): any {
       console.error('[ROOM-NAME] room sync failed:', error instanceof Error ? error.message : String(error));
       return [];
     }).finally(() => { refreshing = null; });
-    return refreshing;
+    return refreshing!;
   };
 
   const resolveId = async (value: any): Promise<string> => {
