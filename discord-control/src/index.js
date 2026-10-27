@@ -217,12 +217,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return interaction.editReply(`카카오 연결: ${status.authenticated ? '인증됨' : '미인증'}\n계정: ${status.nickname || '확인 불가'}`);
         } catch (e) { return interaction.editReply('연결 상태 브리지 미구현/접속 불가: ' + e.message); }
       }
+      if (interaction.customId.startsWith('macro_stop_')) {
+        const id = interaction.customId.slice('macro_stop_'.length);
+        if (!/^[a-zA-Z0-9_-]+$/.test(id)) return replyError(interaction, '매크로 ID 형식이 올바르지 않습니다.');
+        await interaction.deferReply({ ephemeral: true });
+        try {
+          await bridge('/v1/macros/' + encodeURIComponent(id), { method: 'DELETE' });
+          await audit(interaction.user.id, 'macro_stop', { macroId: id });
+          return interaction.editReply('매크로를 정지했습니다.');
+        } catch (e) { return interaction.editReply('정지 실패: ' + e.message); }
+      }
       if (interaction.customId === 'panel_macros') {
         await interaction.deferReply({ ephemeral: true });
         try {
           const result = await bridge('/v1/macros');
           const macros = Array.isArray(result.macros) ? result.macros : [];
-          return interaction.editReply(macros.length ? macros.slice(0, 20).map((m) => `• ${m.roomName || m.roomId} — ${m.intervalMinutes}분 간격 — ${m.enabled === false ? '정지' : '실행'} — ID ${m.id}`).join('\n') : '등록된 매크로가 없습니다.');
+          const visible = macros.slice(-5).reverse();
+          const content = visible.length ? visible.map((m) => `• ${m.roomName || m.roomId} — ${m.intervalMinutes}분 간격 — ${m.enabled === false ? '정지' : '실행'} — ID ${m.id}`).join('\n') : '등록된 매크로가 없습니다.';
+          const components = visible.filter((m) => m.enabled !== false).slice(0, 5).map((m) => new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('macro_stop_' + String(m.id)).setLabel('정지: ' + String(m.roomName || m.roomId).slice(0, 50)).setStyle(ButtonStyle.Danger),
+          ));
+          return interaction.editReply({ content, components });
         } catch (e) { return interaction.editReply('매크로 목록 브리지 미구현/접속 불가: ' + e.message); }
       }
       if (interaction.customId === 'macro_confirm') {
