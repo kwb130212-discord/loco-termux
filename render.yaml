@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: loco-discord-control
     runtime: node
     rootDir: discord-control
