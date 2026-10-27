@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: loco-discord-control
+    runtime: node
+    rootDir: discord-control
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: false
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_ADMIN_IDS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: LOCO_BRIDGE_URL
+        sync: false
+      - key: LOCO_BRIDGE_TOKEN
+        sync: false
