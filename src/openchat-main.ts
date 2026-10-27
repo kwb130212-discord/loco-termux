@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import QRCode from 'qrcode';
 import { createAuthByQR, createClient, getMemberType } from './kakaoforge-runtime';
@@ -124,7 +124,7 @@ async function requestQrImage(): Promise<State> {
   const ready = new Promise<string>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   qrTask = createAuthByQR({
     authPath: AUTH,
-    deviceUuid: randomUUID(),
+    deviceUuid: createHash('sha256').update(randomUUID(), 'utf8').digest('hex'),
     deviceName: 'LOCO-Termux Discord Bridge',
     modelName: 'LOCO-Discord',
     forced: false,
