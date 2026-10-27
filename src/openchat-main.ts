@@ -210,6 +210,8 @@ function startBridge(): void {
       const rows = getMacroRows();
       const found = rows.find((item) => String(item.id) === match[1]);
       if (!found) return sendJson(404, { error: 'Macro not found' });
+      const requestedBy = String(url.searchParams.get('requestedBy') || '');
+      if (!requestedBy || String(found.createdBy || '') !== requestedBy) return sendJson(403, { error: 'Only the macro creator can stop it' });
       found.enabled = false;
       found.stoppedAt = new Date().toISOString();
       saveMacroRows(rows);
