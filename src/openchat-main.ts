@@ -168,10 +168,10 @@ function startBridge(): void {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       res.end(JSON.stringify(body));
     };
+    const url = new URL(req.url || '/', 'http://127.0.0.1');
     if (req.method === 'GET' && url.pathname === '/health') return sendJson(200, { ok: true, authenticated: Boolean(activeChat) });
     const auth = String(req.headers.authorization || '');
     if (!auth.startsWith('Bearer ') || !secureTokenMatches(auth.slice(7))) return sendJson(401, { error: 'Unauthorized' });
-    const url = new URL(req.url || '/', 'http://127.0.0.1');
     if (req.method === 'POST' && url.pathname === '/v1/auth/qr') {
       void requestQrImage().then((payload) => sendJson(200, payload)).catch((error: unknown) => sendJson(409, { error: error instanceof Error ? error.message : String(error) }));
       return;
