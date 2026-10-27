@@ -10,7 +10,7 @@ import type { MessageEvent, MemberEvent, KakaoForgeClient } from './kakaoforge-t
 
 type State = Record<string, any>;
 type EventKind = 'JOIN' | 'LEAVE' | 'KICK';
-const DIR = join(homedir(), '.loco-termux');
+const DIR = process.env.LOCO_DATA_DIR ? join(process.env.LOCO_DATA_DIR) : join(homedir(), '.loco-termux');
 const AUTH = join(DIR, 'kakaoforge-auth.json');
 const STATE = join(DIR, 'loco-transport.json');
 const CMD = join(DIR, 'command-state.json');
@@ -20,7 +20,7 @@ const MAX_EVENTS = 5_000;
 const MAX_MESSAGES = 2_000;
 const OWNER = String(process.env.LOCO_DEVELOPER_ID || '').trim();
 const BRIDGE_TOKEN = String(process.env.LOCO_BRIDGE_TOKEN || '').trim();
-const BRIDGE_PORT = Number(process.env.LOCO_BRIDGE_PORT || 8787);
+const BRIDGE_PORT = Number(process.env.LOCO_BRIDGE_PORT || process.env.PORT || 8787);
 let activeChat: any = null;
 let macroTimer: NodeJS.Timeout | null = null;
 let clientStarted = false;
@@ -168,10 +168,10 @@ function startBridge(): void {
       res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
       res.end(JSON.stringify(body));
     };
+    if (req.method === 'GET' && url.pathname === '/health') return sendJson(200, { ok: true, authenticated: Boolean(activeChat) });
     const auth = String(req.headers.authorization || '');
     if (!auth.startsWith('Bearer ') || !secureTokenMatches(auth.slice(7))) return sendJson(401, { error: 'Unauthorized' });
     const url = new URL(req.url || '/', 'http://127.0.0.1');
-    if (req.method === 'GET' && url.pathname === '/health') return sendJson(200, { ok: true, authenticated: Boolean(activeChat), userId: activeChat ? String((activeChat as any).userId || '') : null });
     if (req.method === 'POST' && url.pathname === '/v1/auth/qr') {
       void requestQrImage().then((payload) => sendJson(200, payload)).catch((error: unknown) => sendJson(409, { error: error instanceof Error ? error.message : String(error) }));
       return;
