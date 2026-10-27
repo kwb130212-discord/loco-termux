@@ -131,3 +131,18 @@ npm run room:export -- --room-id ROOM_ID --format csv --output room.csv
 2. Use `!봇등록` in a room to generate an 8-digit registration code and complete registration before it expires.
 
 When a room allow-list is non-empty, the bot only handles configured rooms. Game-related commands are intentionally not included in this project.
+
+
+## Discord control plane (draft)
+
+The feature branch adds `discord-control/` for a Discord slash-command panel and an authenticated HTTP bridge in `src/openchat-main.ts`.
+
+- `/panel`: macro room selection, QR login request, status, macro list/stop, and license view.
+- `/license-issue`: manual admin grant; payment processing is not included.
+- Supabase license/audit schema: `discord-control/supabase/schema.sql`.
+- Render Blueprint: `render.yaml` defines a persistent-disk Kakao bridge web service and a Discord background worker.
+- Required bridge environment: `LOCO_BRIDGE_TOKEN` (same long random value on both services), `LOCO_BRIDGE_HOST`, `LOCO_BRIDGE_PORT`, and optionally `LOCO_DATA_DIR`.
+
+**Important limitations:** room selection currently lists rooms observed by the runtime, not a guaranteed complete list of all joined Open Chats. QR reissue after an expired in-progress login still needs live validation against the pinned KakaoForge library. Allkick license metadata exists, but automated mass-kick is not implemented. Run the Supabase schema manually and configure Discord, Supabase, and bridge secrets before deployment.
+
+This work is in draft PR [#1](https://github.com/kwb130212-discord/loco-termux/pull/1); it is not merged or deployed.
