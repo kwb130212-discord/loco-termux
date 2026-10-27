@@ -28,6 +28,7 @@ let qrTask: Promise<void> | null = null;
 let qrDataUrl: string | null = null;
 let qrExpiresAt = 0;
 let qrError: string | null = null;
+let qrPasscode: string | null = null;
 mkdirSync(DIR, { recursive: true, mode: 0o700 });
 const load = (path: string): State => { try { const value = JSON.parse(readFileSync(path, 'utf8')); return value && typeof value === 'object' ? value : {}; } catch (error) { console.error(`[STATE] ${path} 읽기 실패:`, error instanceof Error ? error.message : String(error)); return {}; } };
 const save = (path: string, value: unknown): void => { try { writeFileSync(path, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 }); } catch (error) { console.error(`[STATE] ${path} 저장 실패:`, error instanceof Error ? error.message : String(error)); } };
@@ -143,7 +144,7 @@ async function requestQrImage(): Promise<State> {
           rejectReady(error instanceof Error ? error : new Error(qrError));
         });
     },
-    onPasscode: () => console.log('[DiscordBridge] QR passcode requested.'),
+    onPasscode: (passcode: string) => { qrPasscode = String(passcode); console.log('[DiscordBridge] QR verification code received.'); },
   }).then(() => {
     qrTask = null;
     qrDataUrl = null;
@@ -175,6 +176,11 @@ function startBridge(): void {
     if (req.method === 'POST' && url.pathname === '/v1/auth/qr') {
       void requestQrImage().then((payload) => sendJson(200, payload)).catch((error: unknown) => sendJson(409, { error: error instanceof Error ? error.message : String(error) }));
       return;
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/auth/qr/status') {
+      const passcode = qrPasscode;
+      if (passcode) qrPasscode = null;
+      return sendJson(200, { authenticated: Boolean(activeChat), passcode });
     }
     if (req.method === 'GET' && url.pathname === '/v1/auth/status') return sendJson(200, { authenticated: Boolean(activeChat) });
     if (req.method === 'GET' && url.pathname === '/v1/rooms') {
