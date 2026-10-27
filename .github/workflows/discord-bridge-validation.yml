@@ -1,0 +1,24 @@
+name: Discord bridge validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feature/discord-control-panel]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - name: Validate Discord worker JavaScript
+        working-directory: discord-control
+        run: |
+          npm install --no-audit --no-fund
+          node --check src/index.js
