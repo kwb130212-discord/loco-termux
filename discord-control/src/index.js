@@ -1,6 +1,6 @@
 require('dotenv').config();
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, EmbedBuilder, Events,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
   GatewayIntentBits, ModalBuilder, REST, Routes, SlashCommandBuilder,
   StringSelectMenuBuilder, TextInputBuilder, TextInputStyle, AttachmentBuilder,
 } = require('discord.js');
@@ -222,7 +222,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!/^[a-zA-Z0-9_-]+$/.test(id)) return replyError(interaction, '매크로 ID 형식이 올바르지 않습니다.');
         await interaction.deferReply({ ephemeral: true });
         try {
-          await bridge('/v1/macros/' + encodeURIComponent(id), { method: 'DELETE' });
+          await bridge('/v1/macros/' + encodeURIComponent(id) + '?requestedBy=' + encodeURIComponent(interaction.user.id), { method: 'DELETE' });
           await audit(interaction.user.id, 'macro_stop', { macroId: id });
           return interaction.editReply('매크로를 정지했습니다.');
         } catch (e) { return interaction.editReply('정지 실패: ' + e.message); }
@@ -231,7 +231,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply({ ephemeral: true });
         try {
           const result = await bridge('/v1/macros');
-          const macros = Array.isArray(result.macros) ? result.macros : [];
+          const macros = Array.isArray(result.macros) ? result.macros.filter((m) => String(m.createdBy || '') === interaction.user.id) : [];
           const visible = macros.slice(-5).reverse();
           const content = visible.length ? visible.map((m) => `• ${m.roomName || m.roomId} — ${m.intervalMinutes}분 간격 — ${m.enabled === false ? '정지' : '실행'} — ID ${m.id}`).join('\n') : '등록된 매크로가 없습니다.';
           const components = visible.filter((m) => m.enabled !== false).slice(0, 5).map((m) => new ActionRowBuilder().addComponents(
@@ -266,7 +266,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const room = rooms.find((r) => String(r.id) === interaction.values[0]);
       if (!room) return replyError(interaction, '방 목록이 만료됐습니다. 다시 조회하세요.');
       if (room.isOpenChat !== true) return replyError(interaction, '오픈채팅으로 확인된 방만 선택할 수 있습니다.');
-      const { modal, roomId } = macroModal(String(room.id));
+      const { modal } = macroModal(String(room.id));
       selectedRooms.set(interaction.user.id, room);
       return interaction.showModal(modal);
     }
