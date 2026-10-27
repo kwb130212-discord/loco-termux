@@ -71,6 +71,11 @@ if (fs.existsSync(entry)) {
   process.exit(0);
 }
 
+if (!fs.existsSync(srcLogin)) {
+  console.log('[KakaoForge] No bundled source or build entry; defer to runtime pinned-source fallback.');
+  process.exit(0);
+}
+
 console.log('[KakaoForge] Git dependency has no built dist/ directory. Building it now...');
 try {
   run('npm', ['install', '--include=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
