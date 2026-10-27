@@ -11,7 +11,7 @@ create table if not exists public.licenses (
   created_at timestamptz not null default now(),
   constraint licenses_remaining_nonnegative check (remaining_uses is null or remaining_uses >= 0),
   constraint allkick_uses check (
-    (product = 'allkick' and remaining_uses between 0 and 2)
+    (product = 'allkick' and remaining_uses is not null and remaining_uses between 0 and 2)
     or (product <> 'allkick' and remaining_uses is null)
   ),
   constraint macro_monthly_expiry check (
