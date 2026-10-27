@@ -22,6 +22,7 @@ const OWNER = String(process.env.LOCO_DEVELOPER_ID || '').trim();
 const BRIDGE_TOKEN = String(process.env.LOCO_BRIDGE_TOKEN || '').trim();
 const BRIDGE_PORT = Number(process.env.LOCO_BRIDGE_PORT || process.env.PORT || 8787);
 let activeChat: any = null;
+let activeClient: KakaoForgeClient | null = null;
 let macroTimer: NodeJS.Timeout | null = null;
 let clientStarted = false;
 let qrTask: Promise<void> | null = null;
@@ -79,6 +80,34 @@ function observedRooms(): State[] {
   const state = commandState();
   return Object.entries(state.rooms || {}).filter(([, room]: [string, any]) => room && room.roomName)
     .map(([id, room]: [string, any]) => ({ id, name: String(room.roomName), isOpenChat: true, registered: room.registered === true }));
+}
+async function listAvailableRooms(): Promise<State> {
+  if (activeClient && typeof activeClient.getChatRooms === 'function') {
+    const result = await activeClient.getChatRooms();
+    const raw = Array.isArray(result?.chats) ? result.chats : Array.isArray(result) ? result : [];
+    const rooms = raw.map((item: any) => ({
+      id: String(item?.id ?? item?.chatId ?? item?.roomId ?? item?.c ?? ''),
+      name: String(item?.name ?? item?.roomName ?? item?.title ?? ''),
+    })).filter((item: State) => item.id && item.name);
+    if (rooms.length) {
+      const state = commandState();
+      for (const item of rooms) {
+        const room = roomState(state, item.id);
+        room.roomName = item.name;
+      }
+      save(CMD, state);
+      return {
+        rooms: rooms.map((item: State) => ({ ...item, isOpenChat: true, registered: state.rooms[item.id]?.registered === true })),
+        completeness: 'client-getChatRooms',
+        note: 'Room list returned by the connected KakaoForge client.',
+      };
+    }
+  }
+  return {
+    rooms: observedRooms(),
+    completeness: 'observed-only',
+    note: 'KakaoForge room enumeration is unavailable; these are only rooms observed by this runtime.',
+  };
 }
 function saveMacroRows(rows: State[]): void {
   const state = load(STATE);
@@ -185,7 +214,8 @@ function startBridge(): void {
     if (req.method === 'GET' && url.pathname === '/v1/auth/status') return sendJson(200, { authenticated: Boolean(activeChat) });
     if (req.method === 'GET' && url.pathname === '/v1/rooms') {
       if (!activeChat) return sendJson(503, { error: 'KakaoForge client is not ready' });
-      return sendJson(200, { rooms: observedRooms(), completeness: 'observed-only', note: 'This list includes rooms seen by this runtime; it is not guaranteed to include every joined room.' });
+      void listAvailableRooms().then((result) => sendJson(200, result)).catch((error: unknown) => sendJson(502, { error: error instanceof Error ? error.message : String(error) }));
+      return;
     }
     if (req.method === 'GET' && url.pathname === '/v1/macros') return sendJson(200, { macros: getMacroRows() });
     if (req.method === 'POST' && url.pathname === '/v1/macros') {
@@ -237,6 +267,7 @@ function startKakaoClient(): void {
   if (clientStarted || !existsSync(AUTH)) return;
   clientStarted = true;
   const client = createClient({ authPath: AUTH, autoConnect: true, autoReconnect: true, debug: false, sendIntervalMs: 400, pingIntervalMs: 60_000, socketKeepAliveMs: 30_000 }) as KakaoForgeClient;
+  activeClient = client;
   client.onReady((chat: any) => {
     activeChat = chat;
     console.log('[KakaoForge] READY userId=' + client.userId);
