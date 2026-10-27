@@ -20,6 +20,8 @@ const bridgeBase = process.env.LOCO_BRIDGE_URL.replace(/\/+$/, '');
 const bridgeToken = process.env.LOCO_BRIDGE_TOKEN;
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.DirectMessages] });
 const roomSelections = new Map();
+const selectedRooms = new Map();
+const roomPages = new Map();
 const pendingMacros = new Map();
 
 const commands = [
@@ -98,29 +100,40 @@ function panelRows() {
   ];
 }
 
+function roomPagePayload(userId) {
+  const rooms = roomSelections.get(userId) || [];
+  const pages = Math.max(1, Math.ceil(rooms.length / 25));
+  const page = Math.min(Math.max(0, roomPages.get(userId) || 0), pages - 1);
+  roomPages.set(userId, page);
+  const slice = rooms.slice(page * 25, page * 25 + 25);
+  const select = new StringSelectMenuBuilder().setCustomId('macro_room_select')
+    .setPlaceholder('매크로를 실행할 오픈채팅방 선택').setMinValues(1).setMaxValues(1)
+    .addOptions(slice.map((r) => ({
+      label: String(r.name).slice(0, 100),
+      description: ('방 ID: ' + String(r.id)).slice(0, 100),
+      value: String(r.id).slice(0, 100),
+    })));
+  const rows = [new ActionRowBuilder().addComponents(select)];
+  if (pages > 1) rows.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('macro_rooms_prev').setLabel('이전').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId('macro_rooms_next').setLabel('다음').setStyle(ButtonStyle.Secondary).setDisabled(page >= pages - 1),
+  ));
+  return { content: `확인된 오픈채팅방 ${rooms.length}개 · 페이지 ${page + 1}/${pages}. 방 이름이 같아도 방 ID로 구분됩니다.`, components: rows };
+}
+
 async function showRooms(interaction) {
   const licenses = await activeLicenses(interaction.user.id);
   if (!canMacro(licenses)) return replyError(interaction, '매크로 라이선스가 없습니다. 월간권 또는 평생권을 확인하세요.');
   await interaction.deferReply({ ephemeral: true });
   let result;
   try { result = await bridge('/v1/rooms'); }
-  catch (e) { return interaction.editReply('실제 오픈채팅방 목록 브리지가 연결되지 않았습니다. 샘플 목록은 표시하지 않았습니다.\n' + e.message); }
+  catch (e) { return interaction.editReply('실제 오픈채팅방 목록 브리지가 연결되지 않았습니다. 샘플 목록은 표시하지 않았습니다.\\n' + e.message); }
   const rooms = Array.isArray(result.rooms) ? result.rooms.filter((r) => r && r.id && r.name && r.isOpenChat === true) : [];
   if (!rooms.length) return interaction.editReply('연결된 계정에서 확인된 오픈채팅방이 없습니다. 먼저 카카오 연결 및 방 목록 동기화를 완료하세요.');
-  const select = new StringSelectMenuBuilder().setCustomId('macro_room_select')
-    .setPlaceholder('매크로를 실행할 오픈채팅방 선택').setMinValues(1).setMaxValues(1)
-    .addOptions(rooms.slice(0, 25).map((r) => ({
-      label: String(r.name).slice(0, 100),
-      description: ('방 ID: ' + String(r.id)).slice(0, 100),
-      value: String(r.id).slice(0, 100),
-    })));
-  roomSelections.set(interaction.user.id, new Map(rooms.map((r) => [String(r.id), r])));
-  await interaction.editReply({
-    content: rooms.length > 25 ? `확인된 방 ${rooms.length}개 중 처음 25개입니다. 목록 검색/페이지 기능은 브리지에 추가 연결해야 합니다.` : '실제 조회된 방입니다. 방 이름이 같아도 방 ID로 구분됩니다.',
-    components: [new ActionRowBuilder().addComponents(select)],
-  });
+  roomSelections.set(interaction.user.id, rooms);
+  roomPages.set(interaction.user.id, 0);
+  return interaction.editReply(roomPagePayload(interaction.user.id));
 }
-
 function macroModal(roomId) {
   const modal = new ModalBuilder().setCustomId('macro_modal').setTitle('매크로 메시지 설정');
   const message = new TextInputBuilder().setCustomId('macro_message').setLabel('보낼 메시지')
@@ -173,6 +186,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isButton()) {
       if (interaction.customId === 'panel_rooms') return await showRooms(interaction);
+      if (interaction.customId === 'macro_rooms_prev' || interaction.customId === 'macro_rooms_next') {
+        const rooms = roomSelections.get(interaction.user.id);
+        if (!rooms) return replyError(interaction, '방 목록이 만료됐습니다. 다시 조회하세요.');
+        const pages = Math.max(1, Math.ceil(rooms.length / 25));
+        const current = roomPages.get(interaction.user.id) || 0;
+        roomPages.set(interaction.user.id, Math.min(pages - 1, Math.max(0, current + (interaction.customId === 'macro_rooms_next' ? 1 : -1))));
+        return interaction.update(roomPagePayload(interaction.user.id));
+      }
       if (interaction.customId === 'panel_license') return await showLicense(interaction);
       if (interaction.customId === 'panel_qr') {
         await interaction.deferReply({ ephemeral: true });
@@ -226,19 +247,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'macro_room_select') {
-      const rooms = roomSelections.get(interaction.user.id);
-      const room = rooms?.get(interaction.values[0]);
+      const rooms = roomSelections.get(interaction.user.id) || [];
+      const room = rooms.find((r) => String(r.id) === interaction.values[0]);
       if (!room) return replyError(interaction, '방 목록이 만료됐습니다. 다시 조회하세요.');
       if (room.isOpenChat !== true) return replyError(interaction, '오픈채팅으로 확인된 방만 선택할 수 있습니다.');
       const { modal, roomId } = macroModal(String(room.id));
-      roomSelections.set(interaction.user.id, new Map([[String(room.id), room]]));
+      selectedRooms.set(interaction.user.id, room);
       return interaction.showModal(modal);
     }
 
     if (interaction.isModalSubmit() && interaction.customId === 'macro_modal') {
-      const roomMap = roomSelections.get(interaction.user.id);
-      if (!roomMap || roomMap.size !== 1) return replyError(interaction, '선택한 방 정보가 만료됐습니다. 다시 선택하세요.');
-      const room = [...roomMap.values()][0];
+      const room = selectedRooms.get(interaction.user.id);
+      if (!room) return replyError(interaction, '선택한 방 정보가 만료됐습니다. 다시 선택하세요.');
       const message = interaction.fields.getTextInputValue('macro_message').trim();
       const intervalMinutes = Number(interaction.fields.getTextInputValue('macro_interval').trim());
       if (!message || message.length > 1500) return replyError(interaction, '메시지는 1~1500자로 입력하세요.');
