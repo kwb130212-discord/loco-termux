@@ -59,6 +59,24 @@ async function bridge(path, options = {}) {
   }
 }
 
+async function watchQrLogin(user, expiresAt) {
+  const deadline = Number.isFinite(Date.parse(expiresAt)) ? Math.min(Date.parse(expiresAt), Date.now() + 120000) : Date.now() + 120000;
+  let codeSent = false;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    try {
+      const status = await bridge('/v1/auth/qr/status');
+      if (status.passcode && !codeSent) {
+        await user.send('카카오 QR 인증 확인 코드: ' + String(status.passcode) + '\\n카카오톡 인증 화면에서 요청한 코드인지 확인한 뒤 직접 입력하세요.');
+        codeSent = true;
+      }
+      if (status.authenticated) return;
+    } catch (error) {
+      console.error('[qr-watch]', error instanceof Error ? error.message : String(error));
+      return;
+    }
+  }
+}
 async function audit(userId, action, detail = {}) {
   const { error } = await supabase.from('control_audit').insert({
     discord_user_id: String(userId), action, detail,
@@ -207,7 +225,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const attachment = new AttachmentBuilder(Buffer.from(match[2], 'base64'), { name: 'kakao-login-qr.' + ext });
         try {
           await interaction.user.send({ content: `카카오 연결 QR\n만료: ${qr.expiresAt || '브리지 제공 정보 없음'}\n본인이 시작한 로그인 요청인지 확인하고 직접 스캔하세요.`, files: [attachment] });
-          return interaction.editReply('QR을 Discord DM으로 전송했습니다. DM 수신이 꺼져 있으면 봇 DM을 허용한 뒤 다시 요청하세요.');
+          void watchQrLogin(interaction.user, qr.expiresAt);
+          return interaction.editReply('QR을 Discord DM으로 전송했습니다. 인증 확인 코드가 필요한 경우 DM으로 추가 전달됩니다.');
         } catch { return interaction.editReply('Discord DM 전송에 실패했습니다. DM 수신 설정을 확인하세요.'); }
       }
       if (interaction.customId === 'panel_status') {
