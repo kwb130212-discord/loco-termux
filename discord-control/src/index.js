@@ -26,6 +26,8 @@ const pendingMacros = new Map();
 
 const commands = [
   new SlashCommandBuilder().setName('panel').setDescription('매크로 및 연결 상태 제어 패널 열기'),
+  new SlashCommandBuilder().setName('자판기').setDescription('상품을 선택하고 구매 티켓 열기'),
+  new SlashCommandBuilder().setName('티켓').setDescription('구매·결제 문의 티켓 열기'),
   new SlashCommandBuilder().setName('license').setDescription('내 라이선스 확인'),
   new SlashCommandBuilder().setName('license-issue').setDescription('관리자 전용 라이선스 발급')
     .addStringOption(o => o.setName('discord_user_id').setDescription('라이선스를 받을 Discord 사용자 ID').setRequired(true))
@@ -162,6 +164,64 @@ function macroModal(roomId) {
   return { modal, roomId };
 }
 
+async function openTicket(interaction, kind, product) {
+  if (!interaction.guild) return replyError(interaction, '서버 안에서만 티켓을 열 수 있습니다.');
+  const existing = interaction.guild.channels.cache.find((ch) =>
+    ch.type === 0 && ch.topic?.includes('owner:' + interaction.user.id) && ch.topic?.includes('ticket-kind:' + kind));
+  if (existing) return interaction.reply({ content: '이미 열린 티켓이 있습니다: ' + existing.toString(), ephemeral: true });
+  const categoryId = process.env.DISCORD_TICKET_CATEGORY_ID;
+  const staffRoleId = process.env.DISCORD_TICKET_STAFF_ROLE_ID;
+  const permissionOverwrites = [
+    { id: interaction.guild.roles.everyone.id, deny: ['ViewChannel'] },
+    { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'AttachFiles'] },
+    { id: client.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory', 'ManageChannels'] },
+  ];
+  if (staffRoleId) permissionOverwrites.push({ id: staffRoleId, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] });
+  let channel;
+  try {
+    channel = await interaction.guild.channels.create({
+      name: 'ticket-' + interaction.user.username.toLowerCase().replace(/[^a-z0-9가-힣-]/g, '').slice(0, 35) + '-' + interaction.user.id.slice(-4),
+      type: 0,
+      topic: 'owner:' + interaction.user.id + '; ticket-kind:' + kind + (product ? '; product:' + product.product : ''),
+      ...(categoryId ? { parent: categoryId } : {}),
+      permissionOverwrites,
+      reason: 'Private support/purchase ticket',
+    });
+  } catch (error) {
+    console.error('[ticket-create]', error);
+    return replyError(interaction, '티켓 채널 생성에 실패했습니다. 봇에 채널 관리 권한이 있는지 확인하세요.');
+  }
+  if (kind === 'purchase' && product) {
+    const { error } = await supabase.from('shop_orders').insert({
+      discord_user_id: String(interaction.user.id),
+      product: product.product,
+      amount_krw: product.price,
+      status: 'pending',
+      ticket_channel_id: channel.id,
+    });
+    if (error) {
+      await channel.delete('Order DB insert failed').catch(() => {});
+      return replyError(interaction, '주문 저장 실패: ' + error.message);
+    }
+    await audit(interaction.user.id, 'shop_order_created', { product: product.product, amountKrw: product.price, ticketChannelId: channel.id });
+  }
+  const title = kind === 'purchase' && product ? '구매 신청 티켓' : '고객 지원 티켓';
+  const details = kind === 'purchase' && product
+    ? '\\n상품: **' + product.label + '**\\n금액: **' + product.price.toLocaleString('ko-KR') + '원**\\n상태: **결제 대기**\\n\\n운영진이 결제 방법을 안내합니다. 결제 확인 전에는 라이선스가 발급되지 않습니다.'
+    : '\\n문의 내용을 남겨 주세요. 운영진이 확인합니다.';
+  await channel.send({
+    content: '<@' + interaction.user.id + '> ' + (staffRoleId ? '<@&' + staffRoleId + '>' : ''),
+    embeds: [{
+      title,
+      description: '작성자: <@' + interaction.user.id + '>' + details,
+    }],
+    components: [new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_close').setLabel('티켓 종료').setStyle(ButtonStyle.Danger),
+    )],
+  });
+  return interaction.reply({ content: '비공개 티켓을 만들었습니다: ' + channel.toString(), ephemeral: true });
+}
+
 async function showLicense(interaction) {
   const rows = await activeLicenses(interaction.user.id);
   const names = { allkick: '전체강퇴 검토권 (2회)', macro_monthly: '매크로 월간권', macro_lifetime: '매크로 평생권' };
@@ -199,10 +259,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
       if (interaction.commandName === 'license') return await showLicense(interaction);
+      if (interaction.commandName === '자판기') {
+        return interaction.reply({
+          content: '**LOCO 자판기**\\n상품을 선택하면 본인과 운영진만 볼 수 있는 구매 티켓이 열립니다. 결제 확인 전에는 라이선스가 발급되지 않습니다.',
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId('shop_macro_monthly').setLabel('매크로 월간권 · 4,000원').setStyle(ButtonStyle.Primary),
+              new ButtonBuilder().setCustomId('shop_macro_lifetime').setLabel('매크로 평생권 · 10,000원').setStyle(ButtonStyle.Primary),
+            ),
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder().setCustomId('shop_allkick').setLabel('전체강퇴 검토권 2회 · 3,000원').setStyle(ButtonStyle.Secondary),
+              new ButtonBuilder().setCustomId('ticket_general').setLabel('구매/결제 문의').setStyle(ButtonStyle.Secondary),
+            ),
+          ],
+          ephemeral: true,
+        });
+      }
+      if (interaction.commandName === '티켓') return await openTicket(interaction, 'support', null);
       if (interaction.commandName === 'license-issue') return await issueLicense(interaction);
     }
 
     if (interaction.isButton()) {
+      if (interaction.customId === 'ticket_general') return await openTicket(interaction, 'support', null);
+      if (interaction.customId.startsWith('shop_')) {
+        const product = interaction.customId.slice(5);
+        const products = {
+          allkick: { label: '전체강퇴 검토권 2회', price: 3000 },
+          macro_monthly: { label: '매크로 월간권', price: 4000 },
+          macro_lifetime: { label: '매크로 평생권', price: 10000 },
+        };
+        if (!products[product]) return replyError(interaction, '알 수 없는 상품입니다.');
+        return await openTicket(interaction, 'purchase', { product, ...products[product] });
+      }
+      if (interaction.customId === 'ticket_close') {
+        if (!interaction.channel || !interaction.channel.name.startsWith('ticket-')) return replyError(interaction, '티켓 채널에서만 사용할 수 있습니다.');
+        const member = interaction.member;
+        const isStaff = adminIds.has(interaction.user.id) ||
+          (process.env.DISCORD_TICKET_STAFF_ROLE_ID && member?.roles?.cache?.has(process.env.DISCORD_TICKET_STAFF_ROLE_ID));
+        const isOwner = interaction.channel.topic?.includes('owner:' + interaction.user.id);
+        if (!isStaff && !isOwner) return replyError(interaction, '티켓 작성자 또는 운영진만 종료할 수 있습니다.');
+        await interaction.reply({ content: '티켓을 종료합니다. 이 채널은 5초 후 삭제됩니다.' });
+        setTimeout(() => interaction.channel?.delete('Ticket closed').catch(() => {}), 5000);
+        return;
+      }
       if (interaction.customId === 'panel_rooms') return await showRooms(interaction);
       if (interaction.customId === 'macro_rooms_prev' || interaction.customId === 'macro_rooms_next') {
         const rooms = roomSelections.get(interaction.user.id);
