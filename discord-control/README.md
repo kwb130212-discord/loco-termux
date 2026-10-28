@@ -7,7 +7,7 @@ Standalone Discord worker for LOCO-Termux. The KakaoForge HTTP bridge is impleme
 - `/panel` opens a private control panel.
 - Macro setup requests `GET /v1/rooms`, lets the user select a room, then asks for a message and interval and requires a separate confirmation.
 - `POST /v1/auth/qr` starts QR authentication only when there is no saved auth file or active session; a real QR image is sent to the requesting user's Discord DM.
-- `/license` shows product entitlements. Macro products do not unlock moderation.
+- `/자판기` displays priced products and creates a private purchase ticket; `/티켓` opens a support ticket. Orders are recorded in Supabase as `pending` until a configured payment integration verifies them. The current flow is ticket-based and does **not** charge a card or auto-fulfill purchases yet.\n- `/license` shows product entitlements. Macro products do not unlock moderation.
 - `/license-issue` is limited to configured Discord admin IDs. This records a manual grant; payment processing is not implemented.
 - Mass-kick automation is not exposed. A future moderation workflow should preview targets and require a human confirmation per action.
 
@@ -33,11 +33,11 @@ The bridge defaults to localhost. For a public Render web service, set `LOCO_BRI
 
 Set these as Render environment variables. Never commit secrets.
 
-- `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_ADMIN_IDS`
+- `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_ADMIN_IDS`, `DISCORD_TICKET_CATEGORY_ID` (optional), `DISCORD_TICKET_STAFF_ROLE_ID` (optional)
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `LOCO_BRIDGE_URL`, `LOCO_BRIDGE_TOKEN`
 
-Run `discord-control/supabase/schema.sql` in the intended Supabase project before using license commands. The service-role key must remain server-side. Do not use a local JSON file for production license state.
+Run `discord-control/supabase/schema.sql` in the intended Supabase project before using license commands. The service-role key must remain server-side. Do not use a local JSON file for production license state. The bot needs **Manage Channels** permission for private tickets. True automatic purchase requires a payment provider account and verified webhook; until that is configured, tickets collect purchase requests only and do not issue licenses automatically.
 
 ## Deployment status
 
