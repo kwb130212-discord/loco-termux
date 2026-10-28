@@ -300,6 +300,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!products[product]) return replyError(interaction, '알 수 없는 상품입니다.');
         return await openTicket(interaction, 'purchase', { product, ...products[product] });
       }
+      if (interaction.customId.startsWith('ticket_fulfill_')) {
+        if (!adminIds.has(interaction.user.id)) return replyError(interaction, '결제 확인 및 라이선스 발급은 설정된 관리자만 할 수 있습니다.');
+        const orderId = interaction.customId.slice('ticket_fulfill_'.length);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(orderId)) return replyError(interaction, '주문 ID 형식이 올바르지 않습니다.');
+        await interaction.deferReply({ ephemeral: true });
+        const { data, error } = await supabase.rpc('admin_fulfill_shop_order', {
+          p_order_id: orderId,
+          p_admin_discord_id: String(interaction.user.id),
+        });
+        if (error) {
+          console.error('[shop-fulfill]', error.message);
+          return interaction.editReply('발급 실패: Supabase 함수가 적용됐는지 확인하세요. ' + error.message);
+        }
+        const result = Array.isArray(data) ? data[0] : data;
+        if (!result?.success) return interaction.editReply('처리되지 않았습니다: ' + (result?.message || '알 수 없는 상태'));
+        await audit(interaction.user.id, 'shop_order_fulfilled', { orderId, targetUserId: result.discord_user_id, product: result.product });
+        await interaction.channel.send('✅ 관리자가 실제 결제를 확인하고 라이선스를 발급했습니다. 주문 ID: `' + orderId + '` · 대상: <@' + result.discord_user_id + '> · 상품: **' + result.product + '**');
+        return interaction.editReply('결제 확인 및 라이선스 발급 완료. 주문은 중복 처리되지 않도록 완료 상태로 저장됐습니다.');
+      }
       if (interaction.customId === 'ticket_close') {
         if (!interaction.channel || !interaction.channel.name.startsWith('ticket-')) return replyError(interaction, '티켓 채널에서만 사용할 수 있습니다.');
         const member = interaction.member;
