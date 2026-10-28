@@ -43,3 +43,26 @@ alter table public.control_audit enable row level security;
 -- accesses these tables with the service-role key; keep that key private.
 revoke all on public.licenses from anon, authenticated;
 revoke all on public.control_audit from anon, authenticated;
+
+create table if not exists public.shop_orders (
+  id uuid primary key default gen_random_uuid(),
+  discord_user_id text not null check (discord_user_id ~ '^[0-9]{17,20}$'),
+  product text not null check (product in ('allkick', 'macro_monthly', 'macro_lifetime')),
+  amount_krw integer not null check (amount_krw > 0),
+  status text not null default 'pending' check (status in ('pending', 'paid', 'fulfilled', 'cancelled', 'refunded')),
+  payment_provider text,
+  provider_payment_id text unique,
+  ticket_channel_id text,
+  paid_at timestamptz,
+  fulfilled_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists shop_orders_user_time_idx
+  on public.shop_orders (discord_user_id, created_at desc);
+create index if not exists shop_orders_status_time_idx
+  on public.shop_orders (status, created_at desc);
+
+alter table public.shop_orders enable row level security;
+revoke all on public.shop_orders from anon, authenticated;
