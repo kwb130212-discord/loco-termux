@@ -31,16 +31,20 @@
     "room:departed-export": "python3 방관리_cli.py departed-export",
     "dev": "tsx src/index.ts"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "kakaoforge": "git+https://github.com/minjaemin2020/KakaoForge.git#4b774ea40b1347280fadb685415436584093118b",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/qrcode-terminal": "^0.12.2",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "@types/qrcode": "^1.5.5"
   }
 }

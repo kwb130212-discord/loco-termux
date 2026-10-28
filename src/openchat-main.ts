@@ -1,14 +1,16 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { randomInt } from 'node:crypto';
-import { createClient, getMemberType } from './kakaoforge-runtime';
+import { createHash, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createServer } from 'node:http';
+import QRCode from 'qrcode';
+import { createAuthByQR, createClient, getMemberType } from './kakaoforge-runtime';
 import { listDeparted, listLeaveHistory, recordDepartures, removeDeparted } from './departed-db';
 import type { MessageEvent, MemberEvent, KakaoForgeClient } from './kakaoforge-types';
 
 type State = Record<string, any>;
 type EventKind = 'JOIN' | 'LEAVE' | 'KICK';
-const DIR = join(homedir(), '.loco-termux');
+const DIR = process.env.LOCO_DATA_DIR ? join(process.env.LOCO_DATA_DIR) : join(homedir(), '.loco-termux');
 const AUTH = join(DIR, 'kakaoforge-auth.json');
 const STATE = join(DIR, 'loco-transport.json');
 const CMD = join(DIR, 'command-state.json');
@@ -17,6 +19,17 @@ const CODE_TTL = 300_000;
 const MAX_EVENTS = 5_000;
 const MAX_MESSAGES = 2_000;
 const OWNER = String(process.env.LOCO_DEVELOPER_ID || '').trim();
+const BRIDGE_TOKEN = String(process.env.LOCO_BRIDGE_TOKEN || '').trim();
+const BRIDGE_PORT = Number(process.env.LOCO_BRIDGE_PORT || process.env.PORT || 8787);
+let activeChat: any = null;
+let activeClient: KakaoForgeClient | null = null;
+let macroTimer: NodeJS.Timeout | null = null;
+let clientStarted = false;
+let qrTask: Promise<void> | null = null;
+let qrDataUrl: string | null = null;
+let qrExpiresAt = 0;
+let qrError: string | null = null;
+let qrPasscode: string | null = null;
 mkdirSync(DIR, { recursive: true, mode: 0o700 });
 const load = (path: string): State => { try { const value = JSON.parse(readFileSync(path, 'utf8')); return value && typeof value === 'object' ? value : {}; } catch (error) { console.error(`[STATE] ${path} 읽기 실패:`, error instanceof Error ? error.message : String(error)); return {}; } };
 const save = (path: string, value: unknown): void => { try { writeFileSync(path, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 }); } catch (error) { console.error(`[STATE] ${path} 저장 실패:`, error instanceof Error ? error.message : String(error)); } };
@@ -58,5 +71,234 @@ case '!도박': { const bet = Number(args[0]); if (!Number.isInteger(bet) || bet
 case '!봇상태': return reply(`🤖 ${client.connected ? '🟢 연결됨' : '🔴 연결 끊김'}\nuserId: ${client.userId}\n방: ${message.room.name}`); default: return;
 } save(CMD, state); }
 async function sendLeaveLogs(chat: any, event: MemberEvent, rows: State[]): Promise<void> { for (const row of rows) { try { await send(chat, event.room.id, `📤 퇴장로그\n${row.nickname} (${row.userId})\n${fmt(row.at)}\n↩️ 이 메시지에 답장 후 !kick`); } catch (error) { console.error('[KakaoForge][leave-log]', error instanceof Error ? error.message : String(error)); } } }
-async function main(): Promise<void> { if (!existsSync(AUTH)) throw new Error(`QR 로그인이 필요합니다: ${AUTH}`); const client = createClient({ authPath: AUTH, autoConnect: true, autoReconnect: true, debug: false, sendIntervalMs: 400, pingIntervalMs: 60_000, socketKeepAliveMs: 30_000 }) as KakaoForgeClient; client.onReady((chat: any) => { console.log(`[KakaoForge] READY userId=${client.userId}`); console.log(`[KakaoForge] transport=${client.type} openChatOnly=true`); void chat; }); client.onMessage(async (chat: any, message: MessageEvent) => { const state = commandState(); const room = roomState(state, String(message.room.id)); recordMessage(room, message); const uid = userIdOf(message); room.users[uid] ??= { nickname: message.sender.name, messages: 0, points: 0, joined: true }; room.users[uid].nickname = message.sender.name; save(CMD, state); try { await handleCommand(client, chat, message, state, room); } catch (error) { console.error('[KakaoForge][command]', error instanceof Error ? error.message : String(error)); } }); client.onJoin((_chat: any, event: MemberEvent) => { recordMemberEvent('JOIN', event); }); client.onLeave(async (chat: any, event: MemberEvent) => { const rows = recordMemberEvent('LEAVE', event); if (rows.length) await sendLeaveLogs(chat, event, rows); }); client.onKick((_chat: any, event: MemberEvent) => { recordMemberEvent('KICK', event); }); client.on('error', (error: unknown) => { console.error('[KakaoForge][error]', error instanceof Error ? error.stack || error.message : String(error)); }); const shutdown = (): void => { try { client.disconnect?.(); } catch (error) { console.error('[KakaoForge][shutdown]', error instanceof Error ? error.message : String(error)); } }; process.once('SIGINT', shutdown); process.once('SIGTERM', shutdown); }
+function secureTokenMatches(candidate: string): boolean {
+  const a = Buffer.from(BRIDGE_TOKEN);
+  const b = Buffer.from(candidate);
+  return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
+}
+function observedRooms(): State[] {
+  const state = commandState();
+  return Object.entries(state.rooms || {}).filter(([, room]: [string, any]) => room && room.roomName)
+    .map(([id, room]: [string, any]) => ({ id, name: String(room.roomName), isOpenChat: true, registered: room.registered === true }));
+}
+async function listAvailableRooms(): Promise<State> {
+  if (activeClient && typeof activeClient.getChatRooms === 'function') {
+    const result = await activeClient.getChatRooms();
+    const raw = Array.isArray(result?.chats) ? result.chats : Array.isArray(result) ? result : [];
+    const rooms = raw.map((item: any) => ({
+      id: String(item?.id ?? item?.chatId ?? item?.roomId ?? item?.c ?? ''),
+      name: String(item?.name ?? item?.roomName ?? item?.title ?? ''),
+    })).filter((item: State) => item.id && item.name);
+    if (rooms.length) {
+      const state = commandState();
+      for (const item of rooms) {
+        const room = roomState(state, item.id);
+        room.roomName = item.name;
+      }
+      save(CMD, state);
+      return {
+        rooms: rooms.map((item: State) => ({ ...item, isOpenChat: true, registered: state.rooms[item.id]?.registered === true })),
+        completeness: 'client-getChatRooms',
+        note: 'Room list returned by the connected KakaoForge client.',
+      };
+    }
+  }
+  return {
+    rooms: observedRooms(),
+    completeness: 'observed-only',
+    note: 'KakaoForge room enumeration is unavailable; these are only rooms observed by this runtime.',
+  };
+}
+function saveMacroRows(rows: State[]): void {
+  const state = load(STATE);
+  save(STATE, { ...state, discordMacros: rows, updatedAt: new Date().toISOString() });
+}
+function getMacroRows(): State[] {
+  const rows = load(STATE).discordMacros;
+  return Array.isArray(rows) ? rows : [];
+}
+async function processMacros(): Promise<void> {
+  if (!activeChat) return;
+  const rows = getMacroRows();
+  const now = Date.now();
+  for (const macro of rows) {
+    if (!macro || macro.enabled !== true || Number(macro.nextAt || 0) > now) continue;
+    const room = commandState().rooms?.[String(macro.roomId)];
+    if (!room || !room.roomName) {
+      macro.enabled = false;
+      macro.lastError = '방 관측 상태가 확인되지 않아 정지됨';
+      continue;
+    }
+    try {
+      await send(activeChat, macro.roomId, String(macro.message));
+      macro.lastSentAt = new Date().toISOString();
+      macro.nextAt = now + Number(macro.intervalMinutes) * 60_000;
+      macro.lastError = null;
+      console.log('[DiscordBridge] macro sent', macro.id, macro.roomId);
+    } catch (error) {
+      macro.enabled = false;
+      macro.lastError = error instanceof Error ? error.message : String(error);
+      console.error('[DiscordBridge] macro paused', macro.id, macro.lastError);
+    }
+  }
+  saveMacroRows(rows);
+}
+async function requestQrImage(): Promise<State> {
+  if (activeChat) throw new Error('이미 카카오 세션이 연결되어 있습니다.');
+  if (existsSync(AUTH)) throw new Error('저장된 인증 파일이 있습니다. 기존 세션을 확인한 뒤 Termux에서 QR 재로그인을 진행하세요.');
+  if (qrDataUrl && Date.now() < qrExpiresAt) return { qrDataUrl, expiresAt: new Date(qrExpiresAt).toISOString() };
+  if (qrTask) throw new Error(qrError || 'QR 인증이 이미 진행 중입니다. 기존 QR을 사용하세요.');
+  qrError = null;
+  let resolveReady!: (value: string) => void;
+  let rejectReady!: (error: Error) => void;
+  const ready = new Promise<string>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  qrTask = createAuthByQR({
+    authPath: AUTH,
+    deviceUuid: createHash('sha256').update(randomUUID(), 'utf8').digest('hex'),
+    deviceName: 'LOCO-Termux Discord Bridge',
+    modelName: 'LOCO-Discord',
+    forced: false,
+    checkAllowlist: false,
+    enforceAllowlist: false,
+    save: true,
+    onQrUrl: (url: string) => {
+      void QRCode.toDataURL(url, { errorCorrectionLevel: 'M', margin: 2, width: 320 })
+        .then((dataUrl: string) => {
+          qrDataUrl = dataUrl;
+          qrExpiresAt = Date.now() + 120_000;
+          resolveReady(dataUrl);
+        })
+        .catch((error: unknown) => {
+          qrError = error instanceof Error ? error.message : String(error);
+          rejectReady(error instanceof Error ? error : new Error(qrError));
+        });
+    },
+    onPasscode: (passcode: string) => { qrPasscode = String(passcode); console.log('[DiscordBridge] QR verification code received.'); },
+  }).then(() => {
+    qrTask = null;
+    qrDataUrl = null;
+    qrExpiresAt = 0;
+    startKakaoClient();
+  }).catch((error: unknown) => {
+    qrTask = null;
+    qrError = error instanceof Error ? error.message : String(error);
+    console.error('[DiscordBridge] QR login failed:', qrError);
+  });
+  const timeout = new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('QR 생성 시간 초과')), 12_000));
+  const dataUrl = await Promise.race([ready, timeout]);
+  return { qrDataUrl: dataUrl, expiresAt: new Date(qrExpiresAt).toISOString() };
+}
+function startBridge(): void {
+  if (!BRIDGE_TOKEN || BRIDGE_TOKEN.length < 32) {
+    console.warn('[DiscordBridge] LOCO_BRIDGE_TOKEN 미설정 또는 32자 미만 — HTTP 브리지를 시작하지 않습니다.');
+    return;
+  }
+  const server = createServer((req, res) => {
+    const sendJson = (status: number, body: State): void => {
+      res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify(body));
+    };
+    const url = new URL(req.url || '/', 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === '/health') return sendJson(200, { ok: true, authenticated: Boolean(activeChat) });
+    const auth = String(req.headers.authorization || '');
+    if (!auth.startsWith('Bearer ') || !secureTokenMatches(auth.slice(7))) return sendJson(401, { error: 'Unauthorized' });
+    if (req.method === 'POST' && url.pathname === '/v1/auth/qr') {
+      void requestQrImage().then((payload) => sendJson(200, payload)).catch((error: unknown) => sendJson(409, { error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/auth/qr/status') {
+      const passcode = qrPasscode;
+      if (passcode) qrPasscode = null;
+      return sendJson(200, { authenticated: Boolean(activeChat), passcode });
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/auth/status') return sendJson(200, { authenticated: Boolean(activeChat) });
+    if (req.method === 'GET' && url.pathname === '/v1/rooms') {
+      if (!activeChat) return sendJson(503, { error: 'KakaoForge client is not ready' });
+      void listAvailableRooms().then((result) => sendJson(200, result)).catch((error: unknown) => sendJson(502, { error: error instanceof Error ? error.message : String(error) }));
+      return;
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/macros') return sendJson(200, { macros: getMacroRows() });
+    if (req.method === 'POST' && url.pathname === '/v1/macros') {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => { raw += chunk; if (raw.length > 12_000) req.destroy(); });
+      req.on('end', () => {
+        let body: State;
+        try { body = JSON.parse(raw || '{}'); } catch { return sendJson(400, { error: 'Invalid JSON' }); }
+        const roomId = String(body.roomId || '');
+        const message = String(body.message || '').trim();
+        const intervalMinutes = Number(body.intervalMinutes);
+        if (!/^\d+$/.test(roomId) || !message || message.length > 1500 || /@everyone|@here/.test(message)) return sendJson(400, { error: 'Invalid room or message' });
+        if (!Number.isInteger(intervalMinutes) || intervalMinutes < 10 || intervalMinutes > 1440) return sendJson(400, { error: 'intervalMinutes must be 10..1440' });
+        const room = commandState().rooms?.[roomId];
+        if (!activeChat || !room || !room.roomName) return sendJson(403, { error: 'Room must be observed by the LOCO-Termux runtime first' });
+        const rows = getMacroRows();
+        if (rows.some((item) => String(item.roomId) === roomId && item.enabled === true)) return sendJson(409, { error: 'Only one active macro per room is allowed' });
+        const macro = { id: randomInt(1_000_000, 2_147_483_647).toString(), roomId, roomName: room.roomName, message, intervalMinutes, enabled: true, createdAt: new Date().toISOString(), createdBy: String(body.requestedBy || ''), nextAt: Date.now() + intervalMinutes * 60_000 };
+        rows.push(macro);
+        saveMacroRows(rows);
+        return sendJson(201, { id: macro.id, roomId, roomName: macro.roomName, intervalMinutes, enabled: true, firstSendAfterMinutes: intervalMinutes });
+      });
+      return;
+    }
+    const match = url.pathname.match(/^\/v1\/macros\/([a-zA-Z0-9_-]+)$/);
+    if (req.method === 'DELETE' && match) {
+      const rows = getMacroRows();
+      const found = rows.find((item) => String(item.id) === match[1]);
+      if (!found) return sendJson(404, { error: 'Macro not found' });
+      const requestedBy = String(url.searchParams.get('requestedBy') || '');
+      if (!requestedBy || String(found.createdBy || '') !== requestedBy) return sendJson(403, { error: 'Only the macro creator can stop it' });
+      found.enabled = false;
+      found.stoppedAt = new Date().toISOString();
+      saveMacroRows(rows);
+      return sendJson(200, { ok: true });
+    }
+    return sendJson(404, { error: 'Not found' });
+  });
+  server.on('error', (error) => console.error('[DiscordBridge] HTTP error', error));
+  server.listen(BRIDGE_PORT, process.env.LOCO_BRIDGE_HOST || '127.0.0.1', () => console.log('[DiscordBridge] listening on', process.env.LOCO_BRIDGE_HOST || '127.0.0.1', BRIDGE_PORT));
+  macroTimer = setInterval(() => { void processMacros().catch((error) => console.error('[DiscordBridge] scheduler', error)); }, 5000);
+  macroTimer.unref();
+  const close = (): void => { if (macroTimer) clearInterval(macroTimer); server.close(); };
+  process.once('SIGINT', close);
+  process.once('SIGTERM', close);
+}
+function startKakaoClient(): void {
+  if (clientStarted || !existsSync(AUTH)) return;
+  clientStarted = true;
+  const client = createClient({ authPath: AUTH, autoConnect: true, autoReconnect: true, debug: false, sendIntervalMs: 400, pingIntervalMs: 60_000, socketKeepAliveMs: 30_000 }) as KakaoForgeClient;
+  activeClient = client;
+  client.onReady((chat: any) => {
+    activeChat = chat;
+    console.log('[KakaoForge] READY userId=' + client.userId);
+    console.log('[KakaoForge] transport=' + client.type + ' openChatOnly=true');
+  });
+  client.onMessage(async (chat: any, message: MessageEvent) => {
+    const state = commandState();
+    const room = roomState(state, String(message.room.id));
+    room.roomName = String(message.room.name);
+    recordMessage(room, message);
+    const uid = userIdOf(message);
+    room.users[uid] ??= { nickname: message.sender.name, messages: 0, points: 0, joined: true };
+    room.users[uid].nickname = message.sender.name;
+    save(CMD, state);
+    try { await handleCommand(client, chat, message, state, room); }
+    catch (error) { console.error('[KakaoForge][command]', error instanceof Error ? error.message : String(error)); }
+  });
+  client.onJoin((_chat: any, event: MemberEvent) => { recordMemberEvent('JOIN', event); });
+  client.onLeave(async (chat: any, event: MemberEvent) => {
+    const rows = recordMemberEvent('LEAVE', event);
+    if (rows.length) await sendLeaveLogs(chat, event, rows);
+  });
+  client.onKick((_chat: any, event: MemberEvent) => { recordMemberEvent('KICK', event); });
+  client.on('error', (error: unknown) => console.error('[KakaoForge][error]', error instanceof Error ? error.stack || error.message : String(error)));
+  const shutdown = (): void => { try { client.disconnect?.(); } catch (error) { console.error('[KakaoForge][shutdown]', error instanceof Error ? error.message : String(error)); } };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+async function main(): Promise<void> {
+  startBridge();
+  if (existsSync(AUTH)) startKakaoClient();
+  else console.log('[DiscordBridge] Waiting for QR login request.');
+}
 void main().catch((error) => { console.error('[KakaoForge][fatal]', error instanceof Error ? error.stack || error.message : String(error)); process.exitCode = 1; });

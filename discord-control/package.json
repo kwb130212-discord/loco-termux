@@ -1,0 +1,17 @@
+{
+  "name": "loco-discord-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Discord control panel for LOCO-Termux with Supabase-backed entitlements",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.4.7"
+  }
+}

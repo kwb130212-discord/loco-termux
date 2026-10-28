@@ -13,7 +13,14 @@ if (!fs.existsSync(pkgDir)) {
 }
 
 function patchSource() {
-  if (!fs.existsSync(srcLogin)) throw new Error(`[KakaoForge] source file not found: ${srcLogin}`);
+  if (!fs.existsSync(srcLogin)) {
+    if (fs.existsSync(entry)) {
+      console.log('[KakaoForge] installed package has no editable source; using its prebuilt entry.');
+    } else {
+      console.log('[KakaoForge] installed package has no editable source or prebuilt entry; runtime fallback will build the pinned source when needed.');
+    }
+    return false;
+  }
 
   const original = fs.readFileSync(srcLogin, 'utf8');
   let content = original;
@@ -61,6 +68,11 @@ if (patched && fs.existsSync(entry)) fs.rmSync(entry, { force: true });
 
 if (fs.existsSync(entry)) {
   console.log('[KakaoForge] dist/index.js already exists.');
+  process.exit(0);
+}
+
+if (!fs.existsSync(srcLogin)) {
+  console.log('[KakaoForge] No bundled source or build entry; defer to runtime pinned-source fallback.');
   process.exit(0);
 }
 

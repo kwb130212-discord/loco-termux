@@ -1,0 +1,47 @@
+services:
+  # Public HTTP bridge for the authenticated KakaoForge runtime.
+  - type: web
+    name: loco-kakao-bridge
+    runtime: node
+    rootDir: .
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:openchat
+    healthCheckPath: /health
+    autoDeploy: false
+    disk:
+      name: loco-kakao-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: LOCO_BRIDGE_TOKEN
+        sync: false
+      - key: LOCO_BRIDGE_HOST
+        value: 0.0.0.0
+      - key: LOCO_BRIDGE_PORT
+        value: 10000
+      - key: LOCO_DATA_DIR
+        value: /var/data/loco-termux
+
+  # Discord bot control panel.
+  - type: worker
+    name: loco-discord-control
+    runtime: node
+    rootDir: discord-control
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: false
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DISCORD_CLIENT_ID
+        sync: false
+      - key: DISCORD_ADMIN_IDS
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: LOCO_BRIDGE_URL
+        value: https://loco-kakao-bridge.onrender.com
+      - key: LOCO_BRIDGE_TOKEN
+        sync: false
