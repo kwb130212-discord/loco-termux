@@ -66,3 +66,75 @@ create index if not exists shop_orders_status_time_idx
 
 alter table public.shop_orders enable row level security;
 revoke all on public.shop_orders from anon, authenticated;
+
+-- Manual payment confirmation and license fulfillment in one transaction.
+-- The Discord worker checks DISCORD_ADMIN_IDS before calling this function.
+create or replace function public.admin_fulfill_shop_order(
+  p_order_id uuid,
+  p_admin_discord_id text
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_order public.shop_orders%rowtype;
+  v_expiry timestamptz;
+begin
+  select * into v_order
+  from public.shop_orders
+  where id = p_order_id
+  for update;
+
+  if not found then
+    return jsonb_build_object('success', false, 'message', '주문을 찾을 수 없습니다.');
+  end if;
+
+  if v_order.status = 'fulfilled' then
+    return jsonb_build_object('success', false, 'message', '이미 발급 완료된 주문입니다.');
+  end if;
+
+  if v_order.status <> 'pending' then
+    return jsonb_build_object('success', false, 'message', '대기 상태인 주문만 처리할 수 있습니다.');
+  end if;
+
+  if p_admin_discord_id !~ '^[0-9]{17,20}$' then
+    raise exception 'Invalid administrator ID';
+  end if;
+
+  if v_order.product = 'macro_monthly' then
+    v_expiry := now() + interval '30 days';
+  else
+    v_expiry := null;
+  end if;
+
+  insert into public.licenses (
+    discord_user_id, product, remaining_uses, expires_at, status, created_by
+  ) values (
+    v_order.discord_user_id,
+    v_order.product,
+    case when v_order.product = 'allkick' then 2 else null end,
+    v_expiry,
+    'active',
+    p_admin_discord_id
+  );
+
+  update public.shop_orders
+  set status = 'fulfilled',
+      paid_at = now(),
+      fulfilled_at = now(),
+      updated_at = now()
+  where id = v_order.id;
+
+  return jsonb_build_object(
+    'success', true,
+    'message', '결제 확인 및 라이선스 발급 완료',
+    'discord_user_id', v_order.discord_user_id,
+    'product', v_order.product
+  );
+end;
+$$;
+
+revoke all on function public.admin_fulfill_shop_order(uuid, text) from public, anon, authenticated;
+grant execute on function public.admin_fulfill_shop_order(uuid, text) to service_role;
