@@ -191,33 +191,42 @@ async function openTicket(interaction, kind, product) {
     console.error('[ticket-create]', error);
     return replyError(interaction, '티켓 채널 생성에 실패했습니다. 봇에 채널 관리 권한이 있는지 확인하세요.');
   }
+  let orderId = null;
   if (kind === 'purchase' && product) {
-    const { error } = await supabase.from('shop_orders').insert({
+    const { data: order, error } = await supabase.from('shop_orders').insert({
       discord_user_id: String(interaction.user.id),
       product: product.product,
       amount_krw: product.price,
       status: 'pending',
       ticket_channel_id: channel.id,
-    });
-    if (error) {
+    }).select('id').single();
+    if (error || !order) {
       await channel.delete('Order DB insert failed').catch(() => {});
-      return replyError(interaction, '주문 저장 실패: ' + error.message);
+      return replyError(interaction, '주문 저장 실패: ' + (error?.message || '주문 ID를 받지 못했습니다.'));
     }
-    await audit(interaction.user.id, 'shop_order_created', { product: product.product, amountKrw: product.price, ticketChannelId: channel.id });
+    orderId = order.id;
+    await audit(interaction.user.id, 'shop_order_created', { orderId, product: product.product, amountKrw: product.price, ticketChannelId: channel.id });
   }
   const title = kind === 'purchase' && product ? '구매 신청 티켓' : '고객 지원 티켓';
   const details = kind === 'purchase' && product
-    ? '\\n상품: **' + product.label + '**\\n금액: **' + product.price.toLocaleString('ko-KR') + '원**\\n상태: **결제 대기**\\n\\n운영진이 결제 방법을 안내합니다. 결제 확인 전에는 라이선스가 발급되지 않습니다.'
+    ? '\\n주문 ID: `' + orderId + '`\\n상품: **' + product.label + '**\\n금액: **' + product.price.toLocaleString('ko-KR') + '원**\\n상태: **수동 결제 확인 대기**\\n\\n운영진이 결제 안내를 남깁니다. 실제 입금/결제를 확인한 운영진만 아래 버튼으로 확인 처리하세요. 확인 처리 후 라이선스가 발급됩니다.'
     : '\\n문의 내용을 남겨 주세요. 운영진이 확인합니다.';
+  const ticketComponents = [];
+  if (kind === 'purchase' && product && orderId) {
+    ticketComponents.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('ticket_fulfill_' + orderId).setLabel('결제 확인 및 라이선스 발급').setStyle(ButtonStyle.Success),
+    ));
+  }
+  ticketComponents.push(new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('ticket_close').setLabel('티켓 종료').setStyle(ButtonStyle.Danger),
+  ));
   await channel.send({
     content: '<@' + interaction.user.id + '> ' + (staffRoleId ? '<@&' + staffRoleId + '>' : ''),
     embeds: [{
       title,
       description: '작성자: <@' + interaction.user.id + '>' + details,
     }],
-    components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('ticket_close').setLabel('티켓 종료').setStyle(ButtonStyle.Danger),
-    )],
+    components: ticketComponents,
   });
   return interaction.reply({ content: '비공개 티켓을 만들었습니다: ' + channel.toString(), ephemeral: true });
 }
