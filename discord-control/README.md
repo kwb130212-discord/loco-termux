@@ -37,7 +37,7 @@ Set these as Render environment variables. Never commit secrets.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
 - `LOCO_BRIDGE_URL`, `LOCO_BRIDGE_TOKEN`
 
-Run `discord-control/supabase/schema.sql` in the intended Supabase project before using license commands. The service-role key must remain server-side. Do not use a local JSON file for production license state. The bot needs **Manage Channels** permission for private tickets. True automatic purchase requires a payment provider account and verified webhook; until that is configured, tickets collect purchase requests only and do not issue licenses automatically.
+Run the full `discord-control/supabase/schema.sql` in the intended Supabase project before using the shop or license commands. It creates `shop_orders` and the `admin_fulfill_shop_order` RPC. The service-role key must remain server-side. Do not use a local JSON file for production license state. The bot needs **Manage Channels** permission for private tickets. True automatic purchase requires a payment provider account and verified webhook; until that is configured, tickets collect purchase requests only and do not issue licenses automatically.
 
 ## Deployment status
 
